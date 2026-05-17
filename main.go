@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/newoether/conch/config"
-	"github.com/newoether/conch/handler"
-	"github.com/newoether/conch/shell"
+	"github.com/newo-ether/conch/config"
+	"github.com/newo-ether/conch/handler"
+	"github.com/newo-ether/conch/shell"
 )
 
 func main() {

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/newoether/conch/shell"
+	"github.com/newo-ether/conch/shell"
 )
 
 type ExecuteHandler struct {
