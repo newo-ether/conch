@@ -26,7 +26,7 @@ Binaries are placed in `build/`.
 ## Usage
 
 ```sh
-CONCH_API_KEY=my-secret-token CONCH_PORT=8080 ./conch-linux-amd64
+CONCH_API_KEY=my-secret-token CONCH_PORT=14216 ./conch-linux-amd64
 ```
 
 ### Configuration
@@ -35,7 +35,7 @@ All settings are passed via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CONCH_PORT` | `8080` | HTTP listen port |
+| `CONCH_PORT` | `14216` | HTTP listen port |
 | `CONCH_API_KEY` | _(empty)_ | Bearer token for auth. If empty, all requests are allowed without authentication. |
 | `CONCH_TIMEOUT` | `30` | Default command timeout in seconds |
 | `CONCH_MAX_TIMEOUT` | `120` | Maximum allowed timeout in seconds |
