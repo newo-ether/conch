@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -58,7 +59,8 @@ func (e *Executor) Execute(ctx context.Context, req Request) <-chan LineEvent {
 
 		var cmd *exec.Cmd
 		if runtime.GOOS == "windows" {
-			cmd = exec.CommandContext(execCtx, "cmd", "/C", req.Command)
+			cmd = exec.CommandContext(execCtx, "powershell", "-NoProfile", "-")
+			cmd.Stdin = strings.NewReader(req.Command)
 		} else {
 			cmd = exec.CommandContext(execCtx, "/bin/sh", "-c", req.Command)
 		}
