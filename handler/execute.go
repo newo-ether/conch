@@ -65,6 +65,9 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"invalid json body"}`, http.StatusBadRequest)
 			return
 		}
+	} else if len(h.APIKey) > 0 {
+		http.Error(w, `{"error":"encryption required"}`, http.StatusBadRequest)
+		return
 	} else {
 		if err := json.Unmarshal(bodyBytes, &req); err != nil {
 			http.Error(w, `{"error":"invalid json body"}`, http.StatusBadRequest)

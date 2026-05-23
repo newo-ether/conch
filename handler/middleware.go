@@ -2,7 +2,6 @@ package handler
 
 import (
 	"bytes"
-	"crypto/hmac"
 	"crypto/subtle"
 	"io"
 	"net/http"
@@ -35,10 +34,12 @@ func AuthMiddleware(apiKey []byte, nonceTracker *crypto.NonceTracker) func(http.
 				return
 			}
 
-			// 2. Anti-replay: if no X-Signature, fall back to legacy auth
+			// 2. Require X-Signature header
 			sigHeader := r.Header.Get("X-Signature")
 			if sigHeader == "" {
-				next.ServeHTTP(w, r)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`{"error":"missing signature"}`))
 				return
 			}
 
@@ -93,6 +94,3 @@ func AuthMiddleware(apiKey []byte, nonceTracker *crypto.NonceTracker) func(http.
 		})
 	}
 }
-
-// Ensure import hmac is used (for completeness with crypto package)
-var _ = hmac.Equal
