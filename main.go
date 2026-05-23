@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/newo-ether/conch/config"
+	"github.com/newo-ether/conch/crypto"
 	"github.com/newo-ether/conch/handler"
 	"github.com/newo-ether/conch/shell"
 )
@@ -24,12 +26,41 @@ func main() {
 		log.Println("WARNING: CONCH_API_KEY is not set — all requests will be allowed without authentication")
 	}
 
+	// Generate persistent X25519 key pair
+	keyPair, err := crypto.GenerateKeyPair()
+	if err != nil {
+		log.Fatalf("failed to generate X25519 key pair: %v", err)
+	}
+	log.Printf("Server public key: %s", keyPair.PublicKeyBase64())
+
+	nonceTracker := crypto.NewNonceTracker()
+	apiKeyBytes := []byte(cfg.APIKey)
+
 	executor := shell.NewExecutor(cfg.Timeout, cfg.MaxTimeout)
-	executeHandler := &handler.ExecuteHandler{Executor: executor}
+	executeHandler := &handler.ExecuteHandler{
+		Executor: executor,
+		APIKey:   apiKeyBytes,
+		KeyPair:  keyPair,
+	}
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /execute", handler.AuthMiddleware(cfg.APIKey)(executeHandler))
+	mux.Handle("POST /execute", handler.AuthMiddleware(apiKeyBytes, nonceTracker)(executeHandler))
 	mux.HandleFunc("GET /health", handler.HealthHandler)
+	mux.HandleFunc("GET /public-key", func(w http.ResponseWriter, r *http.Request) {
+		nonce, err := crypto.GenerateNonce()
+		if err != nil {
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		pubKey := keyPair.PublicKeyBase64()
+		sig := crypto.SignPayload(apiKeyBytes, nonce, pubKey)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"public_key": pubKey,
+			"nonce":      nonce,
+			"signature":  sig,
+		})
+	})
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),

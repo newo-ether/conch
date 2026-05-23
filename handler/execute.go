@@ -3,13 +3,18 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 
+	"github.com/newo-ether/conch/crypto"
 	"github.com/newo-ether/conch/shell"
 )
 
 type ExecuteHandler struct {
 	Executor *shell.Executor
+	APIKey   []byte
+	KeyPair  *crypto.KeyPair
 }
 
 func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -18,11 +23,53 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
-	var req shell.Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid json body"}`, http.StatusBadRequest)
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	// Read entire body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
 		return
+	}
+
+	var req shell.Request
+	var aesKey []byte
+
+	// Detect encryption
+	if r.Header.Get("X-Encryption") == "v1" {
+		clientPubKeyStr := r.Header.Get("X-Client-Public-Key")
+		if clientPubKeyStr == "" {
+			http.Error(w, `{"error":"missing client public key"}`, http.StatusBadRequest)
+			return
+		}
+		clientPubKey, err := crypto.DecodePublicKey(clientPubKeyStr)
+		if err != nil {
+			log.Printf("ERROR: invalid client public key: %v", err)
+			http.Error(w, `{"error":"invalid client public key"}`, http.StatusBadRequest)
+			return
+		}
+		aesKey, err = crypto.DeriveSharedSecret(h.KeyPair.PrivateKey, clientPubKey)
+		if err != nil {
+			log.Printf("ERROR: key derivation failed: %v", err)
+			http.Error(w, `{"error":"key derivation failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		plaintext, err := crypto.Decrypt(aesKey, string(bodyBytes))
+		if err != nil {
+			log.Printf("ERROR: decryption failed: %v", err)
+			http.Error(w, `{"error":"decryption failed"}`, http.StatusBadRequest)
+			return
+		}
+		if err := json.Unmarshal(plaintext, &req); err != nil {
+			http.Error(w, `{"error":"invalid json body"}`, http.StatusBadRequest)
+			return
+		}
+	} else {
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			http.Error(w, `{"error":"invalid json body"}`, http.StatusBadRequest)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -39,21 +86,40 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	events := h.Executor.Execute(r.Context(), req)
 
 	for evt := range events {
+		var payload string
 		if evt.Error != "" {
 			data, _ := json.Marshal(map[string]string{"message": evt.Error})
-			fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(data))
+			payload = string(data)
+			writeSSE(w, "error", payload, aesKey)
 		} else if evt.ExitCode != nil {
 			data, _ := json.Marshal(map[string]int{"exit_code": *evt.ExitCode})
-			fmt.Fprintf(w, "event: result\ndata: %s\n\n", string(data))
+			payload = string(data)
+			writeSSE(w, "result", payload, aesKey)
 		} else {
 			data, _ := json.Marshal(map[string]string{
 				"line":   evt.Line,
 				"stream": evt.Stream,
 			})
-			fmt.Fprintf(w, "event: line\ndata: %s\n\n", string(data))
+			payload = string(data)
+			writeSSE(w, "line", payload, aesKey)
 		}
 		flusher.Flush()
 	}
+}
+
+func writeSSE(w io.Writer, event, payload string, aesKey []byte) {
+	var data string
+	if aesKey != nil {
+		encrypted, err := crypto.Encrypt(aesKey, []byte(payload))
+		if err != nil {
+			log.Printf("ERROR: SSE encryption failed: %v", err)
+			return
+		}
+		data = encrypted
+	} else {
+		data = payload
+	}
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
 }
 
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
