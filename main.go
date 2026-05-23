@@ -17,6 +17,9 @@ import (
 func main() {
 	cfg := config.Load()
 
+	if cfg.APIKey == "" && !cfg.AllowNoAuth {
+		log.Fatalf("CONCH_API_KEY is required. Set CONCH_ALLOW_NO_AUTH=true to override (insecure).")
+	}
 	if cfg.APIKey == "" {
 		log.Println("WARNING: CONCH_API_KEY is not set — all requests will be allowed without authentication")
 	}
@@ -29,7 +32,7 @@ func main() {
 	mux.HandleFunc("GET /health", handler.HealthHandler)
 
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
+		Addr:         fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 0, // SSE requires unbounded write timeout
@@ -40,7 +43,7 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Printf("conch listening on :%d", cfg.Port)
+		log.Printf("conch listening on %s:%d", cfg.Host, cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}

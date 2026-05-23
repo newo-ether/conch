@@ -35,8 +35,10 @@ All settings are passed via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `CONCH_HOST` | `127.0.0.1` | Listen address |
 | `CONCH_PORT` | `14216` | HTTP listen port |
-| `CONCH_API_KEY` | _(empty)_ | Bearer token for auth. If empty, all requests are allowed without authentication. |
+| `CONCH_API_KEY` | _(required)_ | Bearer token for auth. Server refuses to start without it unless `CONCH_ALLOW_NO_AUTH=true` is set. |
+| `CONCH_ALLOW_NO_AUTH` | `false` | Set to `true` to allow running without an API key (insecure). |
 | `CONCH_TIMEOUT` | `30` | Default command timeout in seconds |
 | `CONCH_MAX_TIMEOUT` | `120` | Maximum allowed timeout in seconds |
 
@@ -101,10 +103,10 @@ Returns server health status. No authentication required.
 
 ```sh
 # Start the server
-CONCH_API_KEY=testkey CONCH_PORT=9090 ./conch-linux-amd64 &
+CONCH_API_KEY=your-secret-token CONCH_PORT=9090 ./conch-linux-amd64 &
 
 # Run a command
-curl -N -H "Authorization: Bearer testkey" \
+curl -N -H "Authorization: Bearer your-secret-token" \
   -X POST http://localhost:9090/execute \
   -d '{"command":"echo hello && echo world >&2","timeout_ms":5000}'
 

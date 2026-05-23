@@ -4,11 +4,16 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"log"
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
+
+// MaxConcurrentCommands caps the number of simultaneously executing commands.
+const MaxConcurrentCommands = 10
 
 type LineEvent struct {
 	Line     string `json:"line,omitempty"`
@@ -26,12 +31,14 @@ type Request struct {
 type Executor struct {
 	DefaultTimeout time.Duration
 	MaxTimeout     time.Duration
+	sem            chan struct{}
 }
 
 func NewExecutor(defaultTimeout, maxTimeout time.Duration) *Executor {
 	return &Executor{
 		DefaultTimeout: defaultTimeout,
 		MaxTimeout:     maxTimeout,
+		sem:            make(chan struct{}, MaxConcurrentCommands),
 	}
 }
 
@@ -43,6 +50,15 @@ func (e *Executor) Execute(ctx context.Context, req Request) <-chan LineEvent {
 
 		if req.Command == "" {
 			ch <- LineEvent{Error: "empty command"}
+			return
+		}
+
+		// Acquire concurrency slot
+		select {
+		case e.sem <- struct{}{}:
+			defer func() { <-e.sem }()
+		case <-ctx.Done():
+			ch <- LineEvent{Error: "request cancelled"}
 			return
 		}
 
@@ -71,23 +87,27 @@ func (e *Executor) Execute(ctx context.Context, req Request) <-chan LineEvent {
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			ch <- LineEvent{Error: "failed to create stdout pipe: " + err.Error()}
+			log.Printf("ERROR: failed to create stdout pipe: %v", err)
+			ch <- LineEvent{Error: "internal error"}
 			return
 		}
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
-			ch <- LineEvent{Error: "failed to create stderr pipe: " + err.Error()}
+			log.Printf("ERROR: failed to create stderr pipe: %v", err)
+			ch <- LineEvent{Error: "internal error"}
 			return
 		}
 
 		if err := cmd.Start(); err != nil {
-			ch <- LineEvent{Error: "failed to start command: " + err.Error()}
+			log.Printf("ERROR: failed to start command: %v", err)
+			ch <- LineEvent{Error: "internal error"}
 			return
 		}
 
-		done := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
 		go func() {
-			defer close(done)
+			defer wg.Done()
 			scanner := bufio.NewScanner(stdout)
 			for scanner.Scan() {
 				ch <- LineEvent{Line: scanner.Text(), Stream: "stdout"}
@@ -95,14 +115,15 @@ func (e *Executor) Execute(ctx context.Context, req Request) <-chan LineEvent {
 		}()
 
 		go func() {
+			defer wg.Done()
 			scanner := bufio.NewScanner(stderr)
 			for scanner.Scan() {
 				ch <- LineEvent{Line: scanner.Text(), Stream: "stderr"}
 			}
 		}()
 
-		<-done
-		cmd.Wait() // stderr goroutine may still be running, but we drain what we got
+		wg.Wait()
+		cmd.Wait()
 
 		exitCode := 0
 		if cmd.ProcessState != nil {
