@@ -18,7 +18,7 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		Port:        envInt("CONCH_PORT", 14216),
-		Host:        envStr("CONCH_HOST", "127.0.0.1"),
+		Host:        envStr("CONCH_HOST", "0.0.0.0"),
 		APIKey:      os.Getenv("CONCH_API_KEY"),
 		Timeout:     time.Duration(envInt("CONCH_TIMEOUT", 30)) * time.Second,
 		MaxTimeout:  time.Duration(envInt("CONCH_MAX_TIMEOUT", 120)) * time.Second,
