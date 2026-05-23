@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"crypto/ecdh"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -60,16 +61,14 @@ func hkdfExpand(prk, info []byte, length int) []byte {
 	}
 	result := make([]byte, length)
 	var t []byte
-	var offset, i int
-	for offset < length {
-		i++
-		h := sha256.New()
+	for offset, i := 0, byte(1); offset < length; i++ {
+		mac := hmac.New(sha256.New, prk)
 		if t != nil {
-			h.Write(t)
+			mac.Write(t)
 		}
-		h.Write(info)
-		h.Write([]byte{byte(i)})
-		t = h.Sum(nil)
+		mac.Write(info)
+		mac.Write([]byte{i})
+		t = mac.Sum(nil)
 		copyLen := min(len(t), length-offset)
 		copy(result[offset:], t[:copyLen])
 		offset += copyLen
