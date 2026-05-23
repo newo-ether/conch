@@ -34,6 +34,7 @@ func main() {
 	log.Printf("Server public key: %s", keyPair.PublicKeyBase64())
 
 	nonceTracker := crypto.NewNonceTracker()
+	rateLimiter := handler.NewRateLimiter(20, 40) // 20 req/s sustained, burst 40
 	apiKeyBytes := []byte(cfg.APIKey)
 
 	executor := shell.NewExecutor(cfg.Timeout, cfg.MaxTimeout)
@@ -63,11 +64,12 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:         fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 0, // SSE requires unbounded write timeout
-		IdleTimeout:  120 * time.Second,
+		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Handler:           rateLimiter.Middleware(mux),
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      0, // SSE requires unbounded write timeout
+		IdleTimeout:       120 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

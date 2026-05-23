@@ -20,55 +20,50 @@ func AuthMiddleware(apiKey []byte, nonceTracker *crypto.NonceTracker) func(http.
 			sigHeader := r.Header.Get("X-Signature")
 			if sigHeader == "" {
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte(`{"error":"missing signature"}`))
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte(`{"error":"unauthorized"}`))
 				return
 			}
 
-			// 3. Verify timestamp
+			// 2. Verify timestamp
 			tsStr := r.Header.Get("X-Timestamp")
 			ts, err := strconv.ParseInt(tsStr, 10, 64)
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte(`{"error":"invalid timestamp"}`))
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte(`{"error":"unauthorized"}`))
 				return
 			}
 
-			// 4. Read body for SHA-256, then reset for downstream handler
+			// 3. Read body for SHA-256, then reset for downstream handler
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte(`{"error":"failed to read body"}`))
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte(`{"error":"unauthorized"}`))
 				return
 			}
 			r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			bodySHA256 := crypto.SHA256Hex(bodyBytes)
 
-			// 5. Verify HMAC nonce
+			// 4. Extract nonce and client public key
 			nonceHMAC := r.Header.Get("X-Nonce")
-			if nonceHMAC == "" {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte(`{"error":"missing nonce"}`))
-				return
-			}
+			clientPubKey := r.Header.Get("X-Client-Public-Key")
 
-			// 6. Verify signature (covers timestamp, method, path, body hash, and nonce)
-			if !crypto.Verify(apiKey, tsStr, r.Method, r.URL.Path, bodySHA256, nonceHMAC, sigHeader) {
+			// 5. Verify signature (covers all request fields including client public key)
+			if !crypto.Verify(apiKey, tsStr, r.Method, r.URL.Path, bodySHA256, nonceHMAC, clientPubKey, sigHeader) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				w.Write([]byte(`{"error":"invalid signature"}`))
+				w.Write([]byte(`{"error":"unauthorized"}`))
 				return
 			}
 
-			// 7. Check nonce for replay
+			// 6. Check nonce for replay
 			if !nonceTracker.CheckAndRecord(ts, nonceHMAC) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				w.Write([]byte(`{"error":"replayed request"}`))
+				w.Write([]byte(`{"error":"unauthorized"}`))
 				return
 			}
 

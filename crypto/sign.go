@@ -9,8 +9,8 @@ import (
 
 // Sign creates an HMAC-SHA256 signature over the concatenated fields.
 // Returns hex-encoded signature (64 chars).
-func Sign(apiKey []byte, timestamp, method, path, bodySHA256, nonce string) string {
-	message := fmt.Sprintf("%s|%s|%s|%s|%s", timestamp, method, path, bodySHA256, nonce)
+func Sign(apiKey []byte, timestamp, method, path, bodySHA256, nonce, clientPubKey string) string {
+	message := fmt.Sprintf("%s|%s|%s|%s|%s|%s", timestamp, method, path, bodySHA256, nonce, clientPubKey)
 	mac := hmac.New(sha256.New, apiKey)
 	mac.Write([]byte(message))
 	return hex.EncodeToString(mac.Sum(nil))
@@ -25,8 +25,8 @@ func SignPayload(apiKey []byte, nonce, payload string) string {
 }
 
 // Verify checks an HMAC-SHA256 signature in constant time.
-func Verify(apiKey []byte, timestamp, method, path, bodySHA256, nonce, signatureHex string) bool {
-	expected := Sign(apiKey, timestamp, method, path, bodySHA256, nonce)
+func Verify(apiKey []byte, timestamp, method, path, bodySHA256, nonce, clientPubKey, signatureHex string) bool {
+	expected := Sign(apiKey, timestamp, method, path, bodySHA256, nonce, clientPubKey)
 	return hmac.Equal([]byte(expected), []byte(signatureHex))
 }
 
