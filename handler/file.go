@@ -270,7 +270,7 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Path == "" {
-		req.Path = "."
+		req.Path, _ = os.UserHomeDir()
 	}
 
 	matches, err := filepath.Glob(filepath.Join(req.Path, req.Pattern))
@@ -318,7 +318,7 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Path == "" {
-		req.Path = "."
+		req.Path, _ = os.UserHomeDir()
 	}
 
 	re, err := regexp.Compile(req.Pattern)
