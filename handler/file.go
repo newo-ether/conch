@@ -282,6 +282,9 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(matches) > 1000 {
 		matches = matches[:1000]
 	}
+	if matches == nil {
+		matches = []string{}
+	}
 
 	writeJSONResponse(w, FileGlobResponse{Files: matches}, aesKey)
 }
@@ -324,7 +327,7 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var matches []GrepMatch
+	matches := make([]GrepMatch, 0)
 
 	var globFunc func(string) bool
 	if req.Glob != "" {
