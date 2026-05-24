@@ -147,7 +147,7 @@ The `conch-mcp` binary exposes a `shell_execute` tool to Claude Desktop via the 
 {
   "mcpServers": {
     "conch": {
-      "command": "/path/to/conch-mcp-windows-amd64.exe",
+      "command": "/path/to/conch-mcp.exe",
       "env": {
         "CONCH_SERVER_URL": "http://<host>:14216",
         "CONCH_API_KEY": "<your-api-key>"
