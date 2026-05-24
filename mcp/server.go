@@ -15,10 +15,14 @@ const serverVersion = "0.1.0"
 
 var shellTool = Tool{
 	Name:        "shell_execute",
-	Description: "Execute a shell command on the remote server via Conch. The command runs in a non-interactive shell (/bin/sh -c or powershell). Output is streamed line-by-line with stdout/stderr markers. Returns the combined output lines and exit code.",
+	Description: "Execute a shell command on a remote server via Conch. The command runs in a non-interactive shell (/bin/sh -c or powershell). Output is streamed line-by-line with stdout/stderr markers. Returns the combined output lines and exit code.",
 	InputSchema: JSONSchema{
 		Type: "object",
 		Properties: map[string]JSONProp{
+			"device": {
+				Type:        "string",
+				Description: "The target device name",
+			},
 			"command": {
 				Type:        "string",
 				Description: "The shell command to execute",
@@ -33,17 +37,17 @@ var shellTool = Tool{
 				Description: "Working directory for the command (optional)",
 			},
 		},
-		Required: []string{"command"},
+		Required: []string{"device", "command"},
 	},
 }
 
 // Server is a stdio-based MCP server.
 type Server struct {
-	transport *Transport
+	transports map[string]*Transport
 }
 
-func NewServer(transport *Transport) *Server {
-	return &Server{transport: transport}
+func NewServer(transports map[string]*Transport) *Server {
+	return &Server{transports: transports}
 }
 
 // Run starts the stdio read-eval loop. Blocks until stdin closes.
@@ -96,8 +100,21 @@ func (s *Server) Run(ctx context.Context) error {
 				},
 			}
 		case "tools/list":
+			tool := shellTool
+				// If single device, make "device" optional
+				if len(s.transports) == 1 {
+					tool.InputSchema.Required = []string{"command"}
+				}
+
+			if len(s.transports) > 1 {
+				names := make([]string, 0, len(s.transports))
+				for n := range s.transports {
+					names = append(names, n)
+				}
+				tool.Description = fmt.Sprintf("Execute a shell command on a remote server via Conch. Available devices: %v. Set the 'device' parameter to choose which device to run on.", names)
+			}
 			result = ToolsListResult{
-				Tools: []Tool{shellTool},
+				Tools: []Tool{tool},
 			}
 		case "tools/call":
 			result, rpcErr = s.handleToolsCall(ctx, base.Params)
@@ -136,6 +153,36 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 		}, nil
 	}
 
+	device, _ := p.Arguments["device"].(string)
+	if device == "" {
+		if len(s.transports) == 1 {
+			for n := range s.transports {
+				device = n
+			}
+		} else {
+			names := make([]string, 0, len(s.transports))
+			for n := range s.transports {
+				names = append(names, n)
+			}
+			return ToolCallResult{
+				Content: []ContentItem{{Type: "text", Text: fmt.Sprintf("Error: device is required. Available: %v", names)}},
+				IsError: true,
+			}, nil
+		}
+	}
+
+	transport, ok := s.transports[device]
+	if !ok {
+		names := make([]string, 0, len(s.transports))
+		for n := range s.transports {
+			names = append(names, n)
+		}
+		return ToolCallResult{
+			Content: []ContentItem{{Type: "text", Text: fmt.Sprintf("Error: unknown device '%s'. Available: %v", device, names)}},
+			IsError: true,
+		}, nil
+	}
+
 	timeoutMs := 30000
 	if t, ok := p.Arguments["timeout_ms"].(float64); ok {
 		timeoutMs = int(t)
@@ -143,7 +190,7 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 
 	workdir, _ := p.Arguments["workdir"].(string)
 
-	events, err := s.transport.Execute(ctx, command, timeoutMs, workdir)
+	events, err := transport.Execute(ctx, command, timeoutMs, workdir)
 	if err != nil {
 		return ToolCallResult{
 			Content: []ContentItem{{Type: "text", Text: fmt.Sprintf("Conch error: %v", err)}},

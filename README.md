@@ -141,7 +141,22 @@ Client                           Server
 
 The `conch-mcp` binary exposes a `shell_execute` tool to Claude Desktop via the Model Context Protocol.
 
-### Configuration
+### Multi-device configuration
+
+```json
+{
+  "mcpServers": {
+    "conch": {
+      "command": "/path/to/conch-mcp.exe",
+      "env": {
+        "CONCH_DEVICES": "{\"pi\":{\"url\":\"http://192.168.1.100:14216\",\"key\":\"xxx\",\"description\":\"Raspberry Pi 4\"},\"laptop\":{\"url\":\"http://192.168.1.200:14216\",\"key\":\"yyy\",\"description\":\"Windows laptop\"}}"
+      }
+    }
+  }
+}
+```
+
+### Single-device (legacy)
 
 ```json
 {
@@ -163,6 +178,7 @@ The `conch-mcp` binary exposes a `shell_execute` tool to Claude Desktop via the 
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
+| `device` | string | yes* | — | Target device name (required when managing multiple devices) |
 | `command` | string | yes | — | Shell command to execute |
 | `timeout_ms` | integer | no | 30000 | Timeout in milliseconds (max 120000) |
 | `workdir` | string | no | — | Working directory |

@@ -1,5 +1,12 @@
 package mcp
 
+// DeviceConfig represents a remote Conch server.
+type DeviceConfig struct {
+	URL         string `json:"url"`
+	Key         string `json:"key"`
+	Description string `json:"description"`
+}
+
 // JSON-RPC 2.0
 
 type Request struct {
