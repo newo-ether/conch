@@ -147,7 +147,7 @@ The `conch-mcp` binary exposes a `shell_execute` tool to Claude Desktop via the 
 {
   "mcpServers": {
     "conch": {
-      "command": "/path/to/conch-mcp.exe",
+      "command": "/path/to/conch-mcp-windows-amd64.exe",
       "env": {
         "CONCH_DEVICES": "{\"pi\":{\"url\":\"http://192.168.1.100:14216\",\"key\":\"xxx\",\"description\":\"Raspberry Pi 4\"},\"laptop\":{\"url\":\"http://192.168.1.200:14216\",\"key\":\"yyy\",\"description\":\"Windows laptop\"}}"
       }
@@ -162,7 +162,7 @@ The `conch-mcp` binary exposes a `shell_execute` tool to Claude Desktop via the 
 {
   "mcpServers": {
     "conch": {
-      "command": "/path/to/conch-mcp.exe",
+      "command": "/path/to/conch-mcp-windows-amd64.exe",
       "env": {
         "CONCH_SERVER_URL": "http://<host>:14216",
         "CONCH_API_KEY": "<your-api-key>"
