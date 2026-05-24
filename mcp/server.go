@@ -8,36 +8,95 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 )
 
 const protocolVersion = "2025-06-18"
 const serverVersion = "0.1.0"
 
-var shellTool = Tool{
-	Name:        "shell_execute",
-	Description: "Execute a shell command on a remote server via Conch. The command runs in a non-interactive shell (/bin/sh -c or powershell). Output is streamed line-by-line with stdout/stderr markers. Returns the combined output lines and exit code.",
-	InputSchema: JSONSchema{
-		Type: "object",
-		Properties: map[string]JSONProp{
-			"device": {
-				Type:        "string",
-				Description: "The target device name",
+var allTools = []Tool{
+	{
+		Name:        "shell_execute",
+		Description: "Execute a shell command on a remote server via Conch. The command runs in a non-interactive shell (/bin/sh -c or powershell). Output is streamed line-by-line with stdout/stderr markers. Returns the combined output lines and exit code.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device":     {Type: "string", Description: "The target device name"},
+				"command":    {Type: "string", Description: "The shell command to execute"},
+				"timeout_ms": {Type: "integer", Description: "Timeout in milliseconds (default: 30000, max: 120000)", Default: 30000},
+				"workdir":    {Type: "string", Description: "Working directory for the command (optional)"},
 			},
-			"command": {
-				Type:        "string",
-				Description: "The shell command to execute",
-			},
-			"timeout_ms": {
-				Type:        "integer",
-				Description: "Timeout in milliseconds (default: 30000, max: 120000)",
-				Default:     30000,
-			},
-			"workdir": {
-				Type:        "string",
-				Description: "Working directory for the command (optional)",
-			},
+			Required: []string{"device", "command"},
 		},
-		Required: []string{"device", "command"},
+	},
+	{
+		Name:        "file_read",
+		Description: "Read a file from a remote device. Returns the file content as text with line count.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device": {Type: "string", Description: "The target device name"},
+				"path":   {Type: "string", Description: "Absolute path to the file"},
+				"offset": {Type: "integer", Description: "Byte offset to start reading from (optional, default 0)"},
+				"limit":  {Type: "integer", Description: "Maximum bytes to read (optional, default 1MB)"},
+			},
+			Required: []string{"device", "path"},
+		},
+	},
+	{
+		Name:        "file_write",
+		Description: "Write content to a file on a remote device. Creates parent directories as needed and overwrites existing files.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device":  {Type: "string", Description: "The target device name"},
+				"path":    {Type: "string", Description: "Absolute path to the file"},
+				"content": {Type: "string", Description: "Content to write to the file"},
+			},
+			Required: []string{"device", "path", "content"},
+		},
+	},
+	{
+		Name:        "file_edit",
+		Description: "Edit a file on a remote device by replacing old_string with new_string. The old_string must match exactly once in the file (or set replace_all to replace all occurrences).",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device":      {Type: "string", Description: "The target device name"},
+				"path":        {Type: "string", Description: "Absolute path to the file"},
+				"old_string":  {Type: "string", Description: "The exact text to find and replace"},
+				"new_string":  {Type: "string", Description: "The replacement text"},
+				"replace_all": {Type: "boolean", Description: "Replace all occurrences instead of requiring a unique match (default: false)"},
+			},
+			Required: []string{"device", "path", "old_string", "new_string"},
+		},
+	},
+	{
+		Name:        "file_glob",
+		Description: "List files and directories on a remote device matching a glob pattern. Supports * and ** wildcards.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device":  {Type: "string", Description: "The target device name"},
+				"pattern": {Type: "string", Description: "Glob pattern (e.g. '*.go', '**/*.md')"},
+				"path":    {Type: "string", Description: "Base directory (optional, defaults to current directory)"},
+			},
+			Required: []string{"device", "pattern"},
+		},
+	},
+	{
+		Name:        "file_grep",
+		Description: "Search for a regex pattern in files on a remote device. Returns matching lines with file paths and line numbers.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device":  {Type: "string", Description: "The target device name"},
+				"pattern": {Type: "string", Description: "Regular expression pattern to search for (RE2 syntax)"},
+				"path":    {Type: "string", Description: "File or directory to search in (optional, defaults to current directory)"},
+				"glob":    {Type: "string", Description: "Filter files by glob pattern, e.g. '*.go' (optional)"},
+			},
+			Required: []string{"device", "pattern"},
+		},
 	},
 }
 
@@ -61,7 +120,6 @@ func (s *Server) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Parse as JSON-RPC
 		var base struct {
 			JSONRPC string          `json:"jsonrpc"`
 			ID      any             `json:"id"`
@@ -77,7 +135,6 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 
 		if base.ID == nil {
-			// Notification — handle if needed, else ignore
 			if base.Method == "initialized" {
 				log.Println("MCP client initialized")
 			}
@@ -100,22 +157,7 @@ func (s *Server) Run(ctx context.Context) error {
 				},
 			}
 		case "tools/list":
-			tool := shellTool
-				// If single device, make "device" optional
-				if len(s.transports) == 1 {
-					tool.InputSchema.Required = []string{"command"}
-				}
-
-			if len(s.transports) > 1 {
-				names := make([]string, 0, len(s.transports))
-				for n := range s.transports {
-					names = append(names, n)
-				}
-				tool.Description = fmt.Sprintf("Execute a shell command on a remote server via Conch. Available devices: %v. Set the 'device' parameter to choose which device to run on.", names)
-			}
-			result = ToolsListResult{
-				Tools: []Tool{tool},
-			}
+			result = s.buildToolsList()
 		case "tools/call":
 			result, rpcErr = s.handleToolsCall(ctx, base.Params)
 		default:
@@ -135,70 +177,94 @@ func (s *Server) Run(ctx context.Context) error {
 	return scanner.Err()
 }
 
+func (s *Server) buildToolsList() ToolsListResult {
+	single := len(s.transports) == 1
+
+	tools := make([]Tool, len(allTools))
+	for i, t := range allTools {
+		tools[i] = t
+		if single {
+			req := make([]string, 0)
+			for _, r := range t.InputSchema.Required {
+				if r != "device" {
+					req = append(req, r)
+				}
+			}
+			tools[i].InputSchema.Required = req
+		}
+	}
+
+	return ToolsListResult{Tools: tools}
+}
+
 func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (any, *Error) {
 	var p ToolCallParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &Error{Code: -32602, Message: "invalid params"}
 	}
 
-	if p.Name != "shell_execute" {
+	transport, errText := s.resolveDevice(p.Arguments)
+	if errText != "" {
+		return errorResult(errText), nil
+	}
+
+	switch p.Name {
+	case "shell_execute":
+		return s.doShellExecute(ctx, transport, p.Arguments)
+	case "file_read":
+		return s.doFileRead(ctx, transport, p.Arguments)
+	case "file_write":
+		return s.doFileWrite(ctx, transport, p.Arguments)
+	case "file_edit":
+		return s.doFileEdit(ctx, transport, p.Arguments)
+	case "file_glob":
+		return s.doFileGlob(ctx, transport, p.Arguments)
+	case "file_grep":
+		return s.doFileGrep(ctx, transport, p.Arguments)
+	default:
 		return nil, &Error{Code: -32602, Message: fmt.Sprintf("unknown tool: %s", p.Name)}
 	}
+}
 
-	command, _ := p.Arguments["command"].(string)
-	if command == "" {
-		return ToolCallResult{
-			Content: []ContentItem{{Type: "text", Text: "Error: command is required"}},
-			IsError: true,
-		}, nil
-	}
-
-	device, _ := p.Arguments["device"].(string)
+func (s *Server) resolveDevice(args map[string]interface{}) (*Transport, string) {
+	device, _ := args["device"].(string)
 	if device == "" {
 		if len(s.transports) == 1 {
 			for n := range s.transports {
 				device = n
 			}
 		} else {
-			names := make([]string, 0, len(s.transports))
-			for n := range s.transports {
-				names = append(names, n)
-			}
-			return ToolCallResult{
-				Content: []ContentItem{{Type: "text", Text: fmt.Sprintf("Error: device is required. Available: %v", names)}},
-				IsError: true,
-			}, nil
+			return nil, fmt.Sprintf("device is required. Available: %v", deviceNames(s.transports))
 		}
 	}
-
-	transport, ok := s.transports[device]
+	t, ok := s.transports[device]
 	if !ok {
-		names := make([]string, 0, len(s.transports))
-		for n := range s.transports {
-			names = append(names, n)
-		}
-		return ToolCallResult{
-			Content: []ContentItem{{Type: "text", Text: fmt.Sprintf("Error: unknown device '%s'. Available: %v", device, names)}},
-			IsError: true,
-		}, nil
+		return nil, fmt.Sprintf("unknown device '%s'. Available: %v", device, deviceNames(s.transports))
 	}
+	return t, ""
+}
 
+// --- shell_execute ---
+
+func (s *Server) doShellExecute(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
+	command, _ := args["command"].(string)
+	if command == "" {
+		return errorResult("command is required"), nil
+	}
 	timeoutMs := 30000
-	if t, ok := p.Arguments["timeout_ms"].(float64); ok {
-		timeoutMs = int(t)
+	if val, ok := args["timeout_ms"].(float64); ok {
+		timeoutMs = int(val)
 	}
+	workdir, _ := args["workdir"].(string)
 
-	workdir, _ := p.Arguments["workdir"].(string)
-
-	events, err := transport.Execute(ctx, command, timeoutMs, workdir)
+	events, err := t.Execute(ctx, command, timeoutMs, workdir)
 	if err != nil {
-		return ToolCallResult{
-			Content: []ContentItem{{Type: "text", Text: fmt.Sprintf("Conch error: %v", err)}},
-			IsError: true,
-		}, nil
+		return errorResult(fmt.Sprintf("Conch error: %v", err)), nil
 	}
+	return formatShellOutput(events), nil
+}
 
-	// Format output
+func formatShellOutput(events []LineEvent) ToolCallResult {
 	var text string
 	hasError := false
 	for _, evt := range events {
@@ -216,15 +282,157 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 			}
 		}
 	}
-
 	if text == "" {
 		text = "(no output)"
 	}
-
 	return ToolCallResult{
 		Content: []ContentItem{{Type: "text", Text: text}},
 		IsError: hasError,
-	}, nil
+	}
+}
+
+// --- file_read ---
+
+func (s *Server) doFileRead(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
+	path, _ := args["path"].(string)
+	if path == "" {
+		return errorResult("path is required"), nil
+	}
+	var offset, limit int64
+	if v, ok := args["offset"].(float64); ok {
+		offset = int64(v)
+	}
+	if v, ok := args["limit"].(float64); ok {
+		limit = int64(v)
+	}
+
+	result, err := t.FileRead(ctx, path, offset, limit)
+	if err != nil {
+		return errorResult(fmt.Sprintf("file_read error: %v", err)), nil
+	}
+	return textResult(result.Content), nil
+}
+
+// --- file_write ---
+
+func (s *Server) doFileWrite(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
+	path, _ := args["path"].(string)
+	content, _ := args["content"].(string)
+	if path == "" {
+		return errorResult("path is required"), nil
+	}
+	if err := t.FileWrite(ctx, path, content); err != nil {
+		return errorResult(fmt.Sprintf("file_write error: %v", err)), nil
+	}
+	return textResult("file written successfully"), nil
+}
+
+// --- file_edit ---
+
+func (s *Server) doFileEdit(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
+	path, _ := args["path"].(string)
+	oldStr, _ := args["old_string"].(string)
+	newStr, _ := args["new_string"].(string)
+	replaceAll, _ := args["replace_all"].(bool)
+
+	if path == "" {
+		return errorResult("path is required"), nil
+	}
+	if oldStr == "" {
+		return errorResult("old_string is required"), nil
+	}
+
+	// Read the file
+	result, err := t.FileRead(ctx, path, 0, 0)
+	if err != nil {
+		return errorResult(fmt.Sprintf("file_edit read error: %v", err)), nil
+	}
+
+	content := result.Content
+	count := strings.Count(content, oldStr)
+	if count == 0 {
+		return errorResult("old_string not found in file"), nil
+	}
+	if count > 1 && !replaceAll {
+		return errorResult(fmt.Sprintf("Found %d matches of old_string. Use replace_all=true to replace all, or provide more context to make it unique.", count)), nil
+	}
+
+	replaced := strings.ReplaceAll(content, oldStr, newStr)
+	if err := t.FileWrite(ctx, path, replaced); err != nil {
+		return errorResult(fmt.Sprintf("file_edit write error: %v", err)), nil
+	}
+
+	if replaceAll {
+		return textResult(fmt.Sprintf("Replaced %d occurrences", count)), nil
+	}
+	return textResult("replaced 1 occurrence"), nil
+}
+
+// --- file_glob ---
+
+func (s *Server) doFileGlob(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
+	pattern, _ := args["pattern"].(string)
+	basePath, _ := args["path"].(string)
+	if pattern == "" {
+		return errorResult("pattern is required"), nil
+	}
+
+	files, err := t.FileGlob(ctx, pattern, basePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("file_glob error: %v", err)), nil
+	}
+	if len(files) == 0 {
+		return textResult("(no matches)"), nil
+	}
+	return textResult(strings.Join(files, "\n")), nil
+}
+
+// --- file_grep ---
+
+func (s *Server) doFileGrep(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
+	pattern, _ := args["pattern"].(string)
+	basePath, _ := args["path"].(string)
+	fileGlob, _ := args["glob"].(string)
+	if pattern == "" {
+		return errorResult("pattern is required"), nil
+	}
+
+	matches, err := t.FileGrep(ctx, pattern, basePath, fileGlob)
+	if err != nil {
+		return errorResult(fmt.Sprintf("file_grep error: %v", err)), nil
+	}
+	if len(matches) == 0 {
+		return textResult("(no matches)"), nil
+	}
+
+	var sb strings.Builder
+	for _, m := range matches {
+		sb.WriteString(fmt.Sprintf("%s:%d: %s\n", m.Path, m.Line, m.Content))
+	}
+	return textResult(strings.TrimSpace(sb.String())), nil
+}
+
+// --- helpers ---
+
+func textResult(text string) ToolCallResult {
+	return ToolCallResult{
+		Content: []ContentItem{{Type: "text", Text: text}},
+	}
+}
+
+func errorResult(text string) ToolCallResult {
+	return ToolCallResult{
+		Content: []ContentItem{{Type: "text", Text: "Error: " + text}},
+		IsError: true,
+	}
+}
+
+func deviceNames(transports map[string]*Transport) []string {
+	names := make([]string, 0, len(transports))
+	for n := range transports {
+		names = append(names, n)
+	}
+	return names
 }
 
 func writeJSON(w io.Writer, v any) error {

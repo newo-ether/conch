@@ -159,6 +159,180 @@ func (t *Transport) Execute(ctx context.Context, command string, timeoutMs int, 
 	return parseSSE(resp.Body, aesKey)
 }
 
+// FileReadResult is the decrypted response from POST /file/read.
+type FileReadResult struct {
+	Content    string `json:"content"`
+	Lines      int    `json:"lines"`
+	TotalLines int    `json:"totalLines"`
+	Error      string `json:"error,omitempty"`
+}
+
+// GrepMatchResult is one match from POST /file/grep.
+type GrepMatchResult struct {
+	Path    string `json:"path"`
+	Line    int    `json:"line"`
+	Content string `json:"content"`
+}
+
+// FileRead sends a file read request.
+func (t *Transport) FileRead(ctx context.Context, path string, offset, limit int64) (*FileReadResult, error) {
+	if limit <= 0 || limit > 1<<20 {
+		limit = 1 << 20
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"path":   path,
+		"offset": offset,
+		"limit":  limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result FileReadResult
+	if err := t.doFileRequest(ctx, "/file/read", body, &result); err != nil {
+		return nil, err
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	return &result, nil
+}
+
+// FileWrite sends a file write request.
+func (t *Transport) FileWrite(ctx context.Context, path, content string) error {
+	body, err := json.Marshal(map[string]string{
+		"path":    path,
+		"content": content,
+	})
+	if err != nil {
+		return err
+	}
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := t.doFileRequest(ctx, "/file/write", body, &result); err != nil {
+		return err
+	}
+	if result.Error != "" {
+		return fmt.Errorf("%s", result.Error)
+	}
+	return nil
+}
+
+// FileGlob sends a file glob request. Returns matching paths.
+func (t *Transport) FileGlob(ctx context.Context, pattern, basePath string) ([]string, error) {
+	body, err := json.Marshal(map[string]string{
+		"pattern": pattern,
+		"path":    basePath,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Files []string `json:"files"`
+		Error string   `json:"error,omitempty"`
+	}
+	if err := t.doFileRequest(ctx, "/file/glob", body, &result); err != nil {
+		return nil, err
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	return result.Files, nil
+}
+
+// FileGrep sends a file grep request. Returns matching lines.
+func (t *Transport) FileGrep(ctx context.Context, pattern, basePath, fileGlob string) ([]GrepMatchResult, error) {
+	body, err := json.Marshal(map[string]string{
+		"pattern": pattern,
+		"path":    basePath,
+		"glob":    fileGlob,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Matches []GrepMatchResult `json:"matches"`
+		Error   string            `json:"error,omitempty"`
+	}
+	if err := t.doFileRequest(ctx, "/file/grep", body, &result); err != nil {
+		return nil, err
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	return result.Matches, nil
+}
+
+// doFileRequest sends an encrypted POST to a path and decrypts the JSON response.
+func (t *Transport) doFileRequest(ctx context.Context, path string, payload []byte, result any) error {
+	if t.serverPubKey == nil {
+		return fmt.Errorf("not initialized — call Initialize first")
+	}
+
+	ephKP, err := crypto.GenerateKeyPair()
+	if err != nil {
+		return fmt.Errorf("generate ephemeral key: %w", err)
+	}
+
+	aesKey, err := crypto.DeriveSharedSecret(ephKP.PrivateKey, t.serverPubKey)
+	if err != nil {
+		return fmt.Errorf("derive AES key: %w", err)
+	}
+
+	encryptedBody, err := crypto.Encrypt(aesKey, payload)
+	if err != nil {
+		return fmt.Errorf("encrypt: %w", err)
+	}
+
+	bodyBytes := []byte(encryptedBody)
+	bodySHA256 := crypto.SHA256Hex(bodyBytes)
+	timestamp := time.Now().Unix()
+	method := "POST"
+	nonce, err := crypto.GenerateNonce()
+	if err != nil {
+		return fmt.Errorf("generate nonce: %w", err)
+	}
+	clientPubKey := crypto.B64.EncodeToString(ephKP.PublicKey.Bytes())
+	signature := crypto.Sign(t.apiKey, fmt.Sprintf("%d", timestamp), method, path, bodySHA256, nonce, clientPubKey)
+
+	req, err := http.NewRequestWithContext(ctx, method, t.serverURL+path, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", timestamp))
+	req.Header.Set("X-Signature", signature)
+	req.Header.Set("X-Nonce", nonce)
+	req.Header.Set("X-Encryption", "v1")
+	req.Header.Set("X-Client-Public-Key", clientPubKey)
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	plaintext, err := crypto.Decrypt(aesKey, string(respBody))
+	if err != nil {
+		return fmt.Errorf("decrypt response: %w", err)
+	}
+
+	if err := json.Unmarshal(plaintext, result); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+	return nil
+}
+
 // parseSSE reads an SSE stream, decrypts data lines, and returns shell events.
 func parseSSE(r io.Reader, aesKey []byte) ([]LineEvent, error) {
 	var events []LineEvent

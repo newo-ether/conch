@@ -45,7 +45,18 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /execute", handler.AuthMiddleware(apiKeyBytes, nonceTracker)(executeHandler))
+	auth := handler.AuthMiddleware(apiKeyBytes, nonceTracker)
+
+	fileReadHandler := &handler.FileReadHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
+	fileWriteHandler := &handler.FileWriteHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
+	fileGlobHandler := &handler.FileGlobHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
+	fileGrepHandler := &handler.FileGrepHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
+
+	mux.Handle("POST /execute", auth(executeHandler))
+	mux.Handle("POST /file/read", auth(fileReadHandler))
+	mux.Handle("POST /file/write", auth(fileWriteHandler))
+	mux.Handle("POST /file/glob", auth(fileGlobHandler))
+	mux.Handle("POST /file/grep", auth(fileGrepHandler))
 	mux.HandleFunc("GET /health", handler.HealthHandler)
 	mux.HandleFunc("GET /public-key", func(w http.ResponseWriter, r *http.Request) {
 		nonce, err := crypto.GenerateNonce()
