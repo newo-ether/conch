@@ -79,6 +79,7 @@ func (e *Executor) Execute(ctx context.Context, req Request) <-chan LineEvent {
 			cmd.Stdin = strings.NewReader(req.Command)
 		} else {
 			cmd = exec.CommandContext(execCtx, "/bin/sh", "-c", req.Command)
+			setSysProcAttr(cmd)
 		}
 
 		if req.Workdir != "" {
@@ -103,6 +104,13 @@ func (e *Executor) Execute(ctx context.Context, req Request) <-chan LineEvent {
 			ch <- LineEvent{Error: "internal error"}
 			return
 		}
+
+		// Kill the entire process tree on timeout so background jobs (& / Start-Job)
+		// won't hold stdout/stderr pipes open and deadlock the scanner goroutines.
+		go func() {
+			<-execCtx.Done()
+			killProcessTree(cmd)
+		}()
 
 		var wg sync.WaitGroup
 		wg.Add(2)
