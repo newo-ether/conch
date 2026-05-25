@@ -161,7 +161,7 @@ if [ -n "${SRC_BIN}" ]; then
 elif command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
     log "Building from source..."
     cd "${REPO_DIR}"
-    go build -o conch ./cmd/conch/
+    go build -o conch .
     SRC_BIN="${REPO_DIR}/conch"
 elif [ -f "${REPO_DIR}/conch" ]; then
     SRC_BIN="${REPO_DIR}/conch"

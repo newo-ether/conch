@@ -53,7 +53,7 @@ git clone git@github.com:newo-ether/conch.git
 cd conch
 
 # Server
-go build -o conch ./cmd/conch/
+go build -o conch .
 ./conch  # CONCH_API_KEY=... required
 
 # MCP binary

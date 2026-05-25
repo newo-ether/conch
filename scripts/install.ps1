@@ -158,7 +158,7 @@ if ($BinaryPath) {
         Write-Success "Building from source..."
         Push-Location $RepoDir
         try {
-            & go build -o conch.exe ./cmd/conch/
+            & go build -o conch.exe .
             if ($LASTEXITCODE -ne 0) { throw "go build failed" }
             $SrcBin = "$RepoDir\conch.exe"
         } finally { Pop-Location }
