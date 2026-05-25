@@ -118,6 +118,7 @@ if ($Uninstall) {
     if ($svc) {
         Stop-ServiceWait -Name $ServiceName
         sc.exe delete $ServiceName 2>&1 | Out-Null
+        nssm remove $ServiceName confirm 2>&1 | Out-Null
         Write-Success "Removed service: $ServiceName"
     } else {
         Write-Warn "Service not found: $ServiceName"
@@ -134,12 +135,15 @@ if ($Uninstall) {
     exit 0
 }
 
+$nssm = Get-Command nssm -ErrorAction SilentlyContinue
+
 # --- Stop and remove existing service ---
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($svc) {
     Write-Warn "Removing existing service..."
     Stop-ServiceWait -Name $ServiceName
     sc.exe delete $ServiceName 2>&1 | Out-Null
+    if ($nssm) { & $nssm.Source remove $ServiceName confirm 2>&1 | Out-Null }
 }
 Get-Process -Name "conch" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
@@ -209,24 +213,35 @@ if ($NoAuth) {
     Write-Warn "Authentication disabled. Do not expose to untrusted networks."
 }
 
-# --- Register Windows service ---
-# sc.exe syntax requires a space after each = sign
-$createResult = sc.exe create $ServiceName `
-    binPath= "`"$BinPath`"" `
-    start= auto `
-    obj= "NT AUTHORITY\SYSTEM" `
-    DisplayName= "Conch Shell Server" 2>&1
-
-if ($LASTEXITCODE -ne 0) {
-    Write-ErrorExit "sc.exe create failed: $createResult"
+# --- Register Windows service via nssm ---
+# nssm is needed because conch does not have native Windows SCM support.
+if (-not $nssm) {
+    Write-ErrorExit "nssm (Non-Sucking Service Manager) is required. Install via: winget install NSSM.NSSM"
 }
-Write-Success "Service registered: $ServiceName (startup: auto)"
 
-# Set environment variables for the service (SCM reads this for LocalSystem services)
-$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+# Stop and remove existing service (both sc.exe and nssm variants)
+$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($svc) {
+    Stop-ServiceWait -Name $ServiceName
+    sc.exe delete $ServiceName 2>&1 | Out-Null
+    nssm remove $ServiceName confirm 2>&1 | Out-Null
+}
+
+# Install with nssm
+& $nssm.Source install $ServiceName "$BinPath" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-ErrorExit "nssm install failed"
+}
+& $nssm.Source set $ServiceName AppDirectory "$InstallDir" 2>&1 | Out-Null
+& $nssm.Source set $ServiceName Start SERVICE_AUTO_START 2>&1 | Out-Null
+& $nssm.Source set $ServiceName ObjectName "NT AUTHORITY\SYSTEM" 2>&1 | Out-Null
+& $nssm.Source set $ServiceName DisplayName "Conch Shell Server" 2>&1 | Out-Null
+
+# Set environment variables
 $envLines = @(Get-Content $EnvFile)
-New-ItemProperty -Path $regPath -Name "Environment" -Value $envLines -PropertyType MultiString -Force | Out-Null
-Write-Success "Environment variables set in registry"
+& $nssm.Source set $ServiceName AppEnvironmentExtra $envLines 2>&1 | Out-Null
+
+Write-Success "Service registered via nssm: $ServiceName (startup: auto)"
 
 # --- Prompts ---
 $DoStart = -not $NoStart
@@ -236,10 +251,10 @@ if (-not $NoStart -and -not $Yes) {
 }
 
 if ($DoStart) {
-    sc.exe start $ServiceName 2>&1 | Out-Null
+    & $nssm.Source start $ServiceName 2>&1 | Out-Null
     Write-Success "Service started"
 } else {
-    Write-Success "Service installed (not started). Start with: sc.exe start $ServiceName"
+    Write-Success "Service installed (not started). Start with: nssm start $ServiceName"
 }
 
 Write-Success ""
@@ -247,7 +262,7 @@ Write-Success "Done. Conch is running as a Windows service."
 Write-Success "Test: curl.exe -s http://localhost:$Port/health"
 Write-Success ""
 Write-Success "Manage:"
-Write-Success "  Stop:      sc.exe stop $ServiceName"
-Write-Success "  Start:     sc.exe start $ServiceName"
-Write-Success "  Status:    sc.exe query $ServiceName"
+Write-Success "  Stop:      nssm stop $ServiceName"
+Write-Success "  Start:     nssm start $ServiceName"
+Write-Success "  Status:    nssm status $ServiceName"
 Write-Success "  Uninstall: .\install.ps1 -Uninstall"

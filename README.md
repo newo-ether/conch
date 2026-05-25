@@ -11,7 +11,7 @@ A lightweight, zero-dependency shell execution server with SSE streaming and end
 - **Rate limiting** — per-IP token bucket (20 req/s sustained, burst 40)
 - **Single binary** — zero dependencies, statically linked, ~8 MiB
 - **Cross-platform** — Linux (arm64/amd64), Windows (amd64), Termux on Android
-- **System service** — installs as systemd (Linux), runit (Termux), or Windows SCM service
+- **System service** — installs as systemd (Linux), runit (Termux), or nssm (Windows)
 - **MCP support** — separate `conch-mcp` binary bridges Claude Desktop (stdio/JSON-RPC) to a remote Conch server
 
 ## Installation
@@ -29,6 +29,7 @@ sudo ./scripts/install.sh --port 14216 --api-key "your-key"
 
 ```powershell
 # Windows (PowerShell, Run as Administrator)
+# Prerequisite: nssm (winget install NSSM.NSSM)
 .\scripts\install.ps1
 .\scripts\install.ps1 -Port 14216 -ApiKey "your-key"
 ```
@@ -103,7 +104,7 @@ curl -s http://localhost:14216/health
 |----------|-------|-----------------|-----------------|
 | Linux | `/bin/sh` | systemd | SIGTERM → SIGKILL escalation |
 | Termux | `$PREFIX/bin/sh` | runit | `proot` + signal fallback |
-| Windows | `cmd.exe /C` | SCM (sc.exe) | Job objects |
+| Windows | `cmd.exe /C` | nssm | Job objects |
 
 On Termux, commands run in `/data/data/com.termux/files/home`. On Windows, `workdir` defaults to `%USERPROFILE%`.
 
