@@ -21,16 +21,16 @@ A lightweight, zero-dependency shell execution server with SSE streaming and end
 ```sh
 # Linux
 sudo ./scripts/install.sh
-sudo ./scripts/install.sh --port 8080 --api-key "your-key"
+sudo ./scripts/install.sh --port 14216 --api-key "your-key"
 
 # Termux
-./scripts/install.sh --port 8080
+./scripts/install.sh --port 14216
 ```
 
 ```powershell
 # Windows (PowerShell, Run as Administrator)
 .\scripts\install.ps1
-.\scripts\install.ps1 -Port 8080 -ApiKey "your-key"
+.\scripts\install.ps1 -Port 14216 -ApiKey "your-key"
 ```
 
 The installer builds from source (Go required), generates a random API key, and registers Conch as a system service. Start/stop/status:
