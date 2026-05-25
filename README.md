@@ -11,27 +11,60 @@ A lightweight, zero-dependency shell execution server with SSE streaming and end
 - **Rate limiting** — per-IP token bucket (20 req/s sustained, burst 40)
 - **Single binary** — zero dependencies, statically linked, ~8 MiB
 - **Cross-platform** — Linux (arm64/amd64), Windows (amd64), Termux on Android
+- **System service** — installs as systemd (Linux), runit (Termux), or Windows SCM service
 - **MCP support** — separate `conch-mcp` binary bridges Claude Desktop (stdio/JSON-RPC) to a remote Conch server
 
 ## Installation
 
-Download from [releases](https://github.com/newo-ether/conch/releases) or build from source:
+### Automated (installer scripts)
+
+```sh
+# Linux
+sudo ./scripts/install.sh
+sudo ./scripts/install.sh --port 8080 --api-key "your-key"
+
+# Termux
+./scripts/install.sh --port 8080
+```
+
+```powershell
+# Windows (PowerShell, Run as Administrator)
+.\scripts\install.ps1
+.\scripts\install.ps1 -Port 8080 -ApiKey "your-key"
+```
+
+The installer builds from source (Go required), generates a random API key, and registers Conch as a system service. Start/stop/status:
+
+```sh
+# Linux
+systemctl start|stop|status conch
+
+# Termux
+sv up|down conch
+
+# Windows
+sc.exe start|stop|query Conch
+```
+
+### From source (manual)
 
 ```sh
 git clone git@github.com:newo-ether/conch.git
 cd conch
 
-# Server binary
-make all              # all platforms
-make build-linux-arm64
-make build-linux-amd64
-make build-windows-amd64
+# Server
+go build -o conch ./cmd/conch/
+./conch  # CONCH_API_KEY=... required
 
-# MCP binary (Claude Desktop integration)
-make mcp-all
-make mcp-linux-arm64
-make mcp-linux-amd64
-make mcp-windows-amd64
+# MCP binary
+go build -o conch-mcp ./cmd/mcp/
+```
+
+### Cross-compilation
+
+```sh
+make all              # server: linux-arm64, linux-amd64, windows-amd64
+make mcp-all          # MCP:    linux-arm64, linux-amd64, windows-amd64
 ```
 
 Binaries land in `build/`.
@@ -40,9 +73,17 @@ Binaries land in `build/`.
 
 ```sh
 export CONCH_API_KEY="your-secret-key"
-./conch-linux-amd64
-# Server public key: <base64url-encoded>
-# conch listening on 0.0.0.0:14216
+./conch
+
+# Or with the installer
+sudo ./scripts/install.sh --api-key "your-secret-key"
+```
+
+Test:
+
+```sh
+curl -s http://localhost:14216/health
+# {"status":"ok"}
 ```
 
 ## Configuration
@@ -55,6 +96,16 @@ export CONCH_API_KEY="your-secret-key"
 | `CONCH_ALLOW_NO_AUTH` | `false` | Start without an API key. Encryption and signing are disabled; all requests are accepted in plaintext. |
 | `CONCH_TIMEOUT` | `30` | Default command timeout in seconds |
 | `CONCH_MAX_TIMEOUT` | `120` | Maximum allowed timeout in seconds |
+
+## Platform behavior
+
+| Platform | Shell | Service manager | Process control |
+|----------|-------|-----------------|-----------------|
+| Linux | `/bin/sh` | systemd | SIGTERM → SIGKILL escalation |
+| Termux | `$PREFIX/bin/sh` | runit | `proot` + signal fallback |
+| Windows | `cmd.exe /C` | SCM (sc.exe) | Job objects |
+
+On Termux, commands run in `/data/data/com.termux/files/home`. On Windows, `workdir` defaults to `%USERPROFILE%`.
 
 ## Protocol
 
@@ -182,19 +233,6 @@ The `conch-mcp` binary exposes a `shell_execute` tool to Claude Desktop via the 
 | `command` | string | yes | — | Shell command to execute |
 | `timeout_ms` | integer | no | 30000 | Timeout in milliseconds (max 120000) |
 | `workdir` | string | no | — | Working directory |
-
-## Cross-compilation
-
-```sh
-make build-linux-arm64    # Termux on Android, Raspberry Pi
-make build-linux-amd64    # Linux servers
-make build-windows-amd64  # Windows
-make mcp-linux-arm64      # MCP binary
-make mcp-linux-amd64
-make mcp-windows-amd64
-make all                  # All server targets
-make mcp-all              # All MCP targets
-```
 
 ## License
 
