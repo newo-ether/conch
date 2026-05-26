@@ -64,6 +64,7 @@ param(
     [int]$MaxTimeoutSec = 120,
     [switch]$NoAuth = $false,
     [string]$BinaryPath = "",
+    [string]$McpBinaryPath = "",
     [string]$Prefix = "",
     [switch]$NoStart = $false,
     [switch]$Yes = $false,
@@ -87,6 +88,7 @@ if (-not $isAdmin) {
 $ServiceName = "Conch"
 $InstallDir  = if ($Prefix) { $Prefix } else { "$env:ProgramFiles\Conch" }
 $BinPath     = "$InstallDir\conch.exe"
+$McpBinPath  = "$InstallDir\conch-mcp.exe"
 $EnvFile     = "$InstallDir\env.txt"
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoDir     = Resolve-Path "$ScriptDir\.."
@@ -179,6 +181,44 @@ if ($BinaryPath) {
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item -Force $SrcBin $BinPath
 Write-Success "Installed: $BinPath"
+
+# --- Build or locate MCP binary ---
+$SrcMcp = $null
+
+if ($McpBinaryPath) {
+    if (-not (Test-Path $McpBinaryPath)) {
+        Write-Warn "MCP binary not found: $McpBinaryPath. Skipping conch-mcp."
+    } else {
+        $SrcMcp = Resolve-Path $McpBinaryPath
+        Write-Success "Using provided MCP binary: $SrcMcp"
+    }
+} else {
+    $GoBin = Get-Command go -ErrorAction SilentlyContinue
+    if ($GoBin -and (Test-Path "$RepoDir\go.mod")) {
+        Write-Success "Building conch-mcp from source..."
+        Push-Location $RepoDir
+        try {
+            & go build -o conch-mcp.exe ./cmd/mcp
+            if ($LASTEXITCODE -ne 0) { throw "go build mcp failed" }
+            $SrcMcp = "$RepoDir\conch-mcp.exe"
+        } catch {
+            Write-Warn "Failed to build conch-mcp: $_"
+        } finally { Pop-Location }
+    } elseif (Test-Path "$RepoDir\conch-mcp.exe") {
+        $SrcMcp = "$RepoDir\conch-mcp.exe"
+        Write-Success "Using prebuilt conch-mcp.exe"
+    } elseif (Get-Command conch-mcp -ErrorAction SilentlyContinue) {
+        $SrcMcp = (Get-Command conch-mcp).Source
+        Write-Success "Using conch-mcp from PATH: $SrcMcp"
+    } else {
+        Write-Warn "No conch-mcp binary found. Skipping MCP bridge install."
+    }
+}
+
+if ($SrcMcp) {
+    Copy-Item -Force $SrcMcp $McpBinPath
+    Write-Success "Installed: $McpBinPath"
+}
 
 # --- API Key ---
 if (-not $ApiKey) {

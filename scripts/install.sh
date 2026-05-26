@@ -48,6 +48,7 @@ Options:
   --no-auth            Disable authentication (insecure, dev only)
   --prefix DIR         Install root directory (default: platform-specific)
   --bin PATH           Use pre-built binary, skip Go build
+  --mcp-bin PATH       Use pre-built MCP binary, skip Go build for MCP
   --no-start           Install but don't start the service
   --uninstall          Remove service and binary
   -y, --yes            Skip all prompts, use defaults
@@ -80,6 +81,7 @@ TIMEOUT="${DEFAULT_TIMEOUT}"
 MAX_TIMEOUT="${DEFAULT_MAX_TIMEOUT}"
 ALLOW_NO_AUTH="false"
 SRC_BIN=""
+SRC_MCP=""
 NO_START=false
 DO_UNINSTALL=false
 YES_ALL=false
@@ -94,6 +96,7 @@ while [ $# -gt 0 ]; do
         --no-auth)       ALLOW_NO_AUTH="true"; shift ;;
         --prefix)        INSTALL_PREFIX="$2"; shift 2 ;;
         --bin)           SRC_BIN="$2"; shift 2 ;;
+        --mcp-bin)       SRC_MCP="$2"; shift 2 ;;
         --no-start)      NO_START=true; shift ;;
         --uninstall)     DO_UNINSTALL=true; shift ;;
         -y|--yes)        YES_ALL=true; shift ;;
@@ -112,6 +115,7 @@ if [ -n "${INSTALL_PREFIX}" ]; then
 fi
 
 BIN_PATH="${BIN_DIR}/conch"
+MCP_BIN_PATH="${BIN_DIR}/conch-mcp"
 ENV_FILE="${CFG_DIR}/env"
 
 # --- Uninstall ---
@@ -139,6 +143,7 @@ if $DO_UNINSTALL; then
 
     rm -f "${BIN_PATH}"
     log "Removed binary: ${BIN_PATH}"
+    rm -f "${MCP_BIN_PATH}"
     rm -rf "${CFG_DIR}"
     log "Removed config: ${CFG_DIR}"
     log "Uninstall complete."
@@ -176,6 +181,38 @@ mkdir -p "${BIN_DIR}"
 cp "${SRC_BIN}" "${BIN_PATH}"
 chmod 755 "${BIN_PATH}"
 log "Installed: ${BIN_PATH}"
+
+# --- Locate or build MCP binary ---
+if [ -n "${SRC_MCP}" ]; then
+    if [ ! -f "${SRC_MCP}" ]; then
+        warn "MCP binary not found: ${SRC_MCP}. Skipping conch-mcp."
+        SRC_MCP=""
+    else
+        log "Using provided MCP binary: ${SRC_MCP}"
+    fi
+elif command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
+    log "Building conch-mcp from source..."
+    cd "${REPO_DIR}"
+    if go build -o conch-mcp ./cmd/mcp; then
+        SRC_MCP="${REPO_DIR}/conch-mcp"
+    else
+        warn "Failed to build conch-mcp. Skipping MCP bridge install."
+    fi
+elif [ -f "${REPO_DIR}/conch-mcp" ]; then
+    SRC_MCP="${REPO_DIR}/conch-mcp"
+    log "Using prebuilt conch-mcp"
+elif command -v conch-mcp &>/dev/null; then
+    SRC_MCP="$(command -v conch-mcp)"
+    log "Using conch-mcp from PATH: ${SRC_MCP}"
+else
+    warn "No conch-mcp binary found. Skipping MCP bridge install."
+fi
+
+if [ -n "${SRC_MCP}" ]; then
+    cp "${SRC_MCP}" "${MCP_BIN_PATH}"
+    chmod 755 "${MCP_BIN_PATH}"
+    log "Installed: ${MCP_BIN_PATH}"
+fi
 
 # --- API Key ---
 mkdir -p "${CFG_DIR}"
