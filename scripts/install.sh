@@ -157,14 +157,53 @@ fi
 
 # --- Locate or build binary ---
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+GITHUB_RELEASES="https://github.com/newo-ether/conch/releases/latest/download"
+
+# Detect platform arch for prebuilt binary download
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)   echo "amd64" ;;
+        aarch64|arm64)  echo "arm64" ;;
+        *)              echo "unknown" ;;
+    esac
+}
+
+# Download from GitHub Releases
+download_binary() {
+    local name="$1" dest="$2"
+    local url="${GITHUB_RELEASES}/${name}"
+    log "Downloading ${name}..."
+    if command -v curl &>/dev/null; then
+        curl -fsSL --connect-timeout 10 --max-time 120 -o "${dest}" "${url}" || return 1
+    elif command -v wget &>/dev/null; then
+        wget -q --timeout=120 -O "${dest}" "${url}" || return 1
+    else
+        return 1
+    fi
+    chmod 755 "${dest}"
+}
+
+ARCH=$(detect_arch)
+if [ "$PLATFORM" = "windows" ]; then
+    SERVER_BIN_NAME="conch-windows-amd64.exe"
+    MCP_BIN_NAME="conch-mcp-windows-amd64.exe"
+elif [ "$PLATFORM" = "termux" ] || [ "$ARCH" = "arm64" ]; then
+    SERVER_BIN_NAME="conch-linux-arm64"
+    MCP_BIN_NAME="conch-mcp-linux-arm64"
+else
+    SERVER_BIN_NAME="conch-linux-amd64"
+    MCP_BIN_NAME="conch-mcp-linux-amd64"
+fi
 
 if [ -n "${SRC_BIN}" ]; then
     if [ ! -f "${SRC_BIN}" ]; then
         die "binary not found: ${SRC_BIN}"
     fi
     log "Using provided binary: ${SRC_BIN}"
+elif download_binary "${SERVER_BIN_NAME}" "${REPO_DIR}/conch"; then
+    SRC_BIN="${REPO_DIR}/conch"
 elif command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
-    log "Building from source..."
+    log "Download failed. Building from source..."
     cd "${REPO_DIR}"
     go build -o conch .
     SRC_BIN="${REPO_DIR}/conch"
@@ -173,7 +212,7 @@ elif [ -f "${REPO_DIR}/conch" ]; then
 elif command -v conch &>/dev/null; then
     SRC_BIN="$(command -v conch)"
 else
-    die "No Go toolchain, no prebuilt binary. Use --bin to specify binary path."
+    die "Failed to download or build binary. Use --bin to specify a pre-built binary path."
 fi
 
 # --- Install binary ---
@@ -190,6 +229,8 @@ if [ -n "${SRC_MCP}" ]; then
     else
         log "Using provided MCP binary: ${SRC_MCP}"
     fi
+elif download_binary "${MCP_BIN_NAME}" "${REPO_DIR}/conch-mcp"; then
+    SRC_MCP="${REPO_DIR}/conch-mcp"
 elif command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
     log "Building conch-mcp from source..."
     cd "${REPO_DIR}"

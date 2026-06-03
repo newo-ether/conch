@@ -1,5 +1,7 @@
 # conch
 
+**English** | [中文](README_CN.md)
+
 A lightweight, zero-dependency shell execution server with SSE streaming and end-to-end encryption. Expose a shell on any device — Linux server, Termux (Android), Windows — and control it securely over the network. Ships with a companion MCP binary for Claude Desktop integration.
 
 ## Features
@@ -16,35 +18,30 @@ A lightweight, zero-dependency shell execution server with SSE streaming and end
 
 ## Installation
 
-### Automated (installer scripts)
+### One-click (recommended)
 
-```sh
-# Linux
-sudo ./scripts/install.sh
+**Linux / Termux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.sh | sudo bash
+```
+
+**Windows (PowerShell as Administrator):**
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.ps1 | iex
+```
+
+The script auto-detects your platform, downloads the pre-built binary from GitHub Releases, generates an API key, and registers a system service.
+
+Custom options:
+```bash
+# Linux: custom port and key
 sudo ./scripts/install.sh --port 14216 --api-key "your-key"
 
-# Termux
-./scripts/install.sh --port 14216
-```
+# Termux (no root needed)
+./scripts/install.sh --port 8080
 
-```powershell
-# Windows (PowerShell, Run as Administrator)
-# Prerequisite: nssm (winget install NSSM.NSSM)
-.\scripts\install.ps1
+# Windows: custom port and key
 .\scripts\install.ps1 -Port 14216 -ApiKey "your-key"
-```
-
-The installer builds from source (Go required), generates a random API key, and registers Conch as a system service. Start/stop/status:
-
-```sh
-# Linux
-systemctl start|stop|status conch
-
-# Termux
-sv up|down conch
-
-# Windows
-sc.exe start|stop|query Conch
 ```
 
 ### From source (manual)

@@ -151,6 +151,25 @@ Get-Process -Name "conch" -ErrorAction SilentlyContinue | Stop-Process -Force -E
 
 # --- Build or locate binary ---
 $SrcBin = $null
+$GitHubReleases = "https://github.com/newo-ether/conch/releases/latest/download"
+
+function Download-File {
+    param([string]$Name, [string]$Dest)
+    $url = "$GitHubReleases/$Name"
+    Write-Success "Downloading $Name..."
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $client = New-Object System.Net.WebClient
+        $client.DownloadFile($url, $Dest)
+        return $true
+    } catch {
+        Write-Warn "Download failed: $_"
+        return $false
+    }
+}
+
+$ServerBinName = "conch-windows-amd64.exe"
+$McpBinName = "conch-mcp-windows-amd64.exe"
 
 if ($BinaryPath) {
     if (-not (Test-Path $BinaryPath)) {
@@ -158,6 +177,8 @@ if ($BinaryPath) {
     }
     $SrcBin = Resolve-Path $BinaryPath
     Write-Success "Using provided binary: $SrcBin"
+} elseif (Download-File $ServerBinName "$RepoDir\conch.exe") {
+    $SrcBin = "$RepoDir\conch.exe"
 } else {
     $GoBin = Get-Command go -ErrorAction SilentlyContinue
     if ($GoBin -and (Test-Path "$RepoDir\go.mod")) {
@@ -173,7 +194,7 @@ if ($BinaryPath) {
     } elseif (Get-Command conch -ErrorAction SilentlyContinue) {
         $SrcBin = (Get-Command conch).Source
     } else {
-        Write-ErrorExit "No Go toolchain, no prebuilt conch.exe. Use -BinaryPath to specify one."
+        Write-ErrorExit "Failed to download or build binary. Use -BinaryPath to specify a pre-built binary path."
     }
 }
 
@@ -192,6 +213,8 @@ if ($McpBinaryPath) {
         $SrcMcp = Resolve-Path $McpBinaryPath
         Write-Success "Using provided MCP binary: $SrcMcp"
     }
+} elseif (Download-File $McpBinName "$RepoDir\conch-mcp.exe") {
+    $SrcMcp = "$RepoDir\conch-mcp.exe"
 } else {
     $GoBin = Get-Command go -ErrorAction SilentlyContinue
     if ($GoBin -and (Test-Path "$RepoDir\go.mod")) {
