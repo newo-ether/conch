@@ -40,9 +40,13 @@ type FileWriteResponse struct {
 }
 
 // FileGlobRequest is the decrypted body for POST /file/glob.
+// Depth is optional: nil preserves the legacy single-level glob; a non-nil value
+// switches to a recursive walk limited to that many directory levels below Path,
+// where 0 (or any value <= 0) means unlimited recursion.
 type FileGlobRequest struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path"`
+	Depth   *int   `json:"depth"`
 }
 
 type FileGlobResponse struct {
@@ -273,10 +277,17 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Path, _ = os.UserHomeDir()
 	}
 
-	matches, err := filepath.Glob(filepath.Join(req.Path, req.Pattern))
-	if err != nil {
-		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("glob: %v", err)}, aesKey)
-		return
+	var matches []string
+	if req.Depth == nil {
+		// Legacy behavior: single-level glob, fully backward compatible.
+		matches, err = filepath.Glob(filepath.Join(req.Path, req.Pattern))
+		if err != nil {
+			writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("glob: %v", err)}, aesKey)
+			return
+		}
+	} else {
+		// Recursive walk limited to *req.Depth directory levels (<= 0 means unlimited).
+		matches = globWithDepth(req.Path, req.Pattern, *req.Depth)
 	}
 
 	if len(matches) > 1000 {
@@ -287,6 +298,38 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSONResponse(w, FileGlobResponse{Files: matches}, aesKey)
+}
+
+// globWithDepth walks root and returns files whose basename matches pattern,
+// descending at most maxDepth directory levels below root. maxDepth <= 0 means
+// unlimited. A file directly inside root counts as depth 1.
+func globWithDepth(root, pattern string, maxDepth int) []string {
+	matches := make([]string, 0)
+	rootClean := filepath.Clean(root)
+	rootSeps := strings.Count(rootClean, string(os.PathSeparator))
+	filepath.Walk(rootClean, func(path string, info os.FileInfo, err error) error {
+		if err != nil || path == rootClean {
+			return nil
+		}
+		level := strings.Count(filepath.Clean(path), string(os.PathSeparator)) - rootSeps
+		if info.IsDir() {
+			if maxDepth > 0 && level >= maxDepth {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if maxDepth > 0 && level > maxDepth {
+			return nil
+		}
+		if ok, _ := filepath.Match(pattern, filepath.Base(path)); ok {
+			matches = append(matches, path)
+			if len(matches) >= 1000 {
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	return matches
 }
 
 // FileGrepHandler serves POST /file/grep.
