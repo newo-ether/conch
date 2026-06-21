@@ -90,8 +90,23 @@ $InstallDir  = if ($Prefix) { $Prefix } else { "$env:ProgramFiles\Conch" }
 $BinPath     = "$InstallDir\conch.exe"
 $McpBinPath  = "$InstallDir\conch-mcp.exe"
 $EnvFile     = "$InstallDir\env.txt"
-$ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RepoDir     = Resolve-Path "$ScriptDir\.."
+# $ScriptDir is $null when invoked via irm | iex (no actual script file).
+# In that case, use the current directory as the fallback working root.
+$ScriptDir = if ($MyInvocation.MyCommand.Path) {
+    Split-Path -Parent $MyInvocation.MyCommand.Path
+} else {
+    Get-Location
+}
+$RepoDir = if (Test-Path "$ScriptDir\go.mod") {
+    Resolve-Path "$ScriptDir"
+} elseif (Test-Path "$ScriptDir\..\go.mod") {
+    Resolve-Path "$ScriptDir\.."
+} else {
+    # Fallback: use a temp staging directory (GitHub download doesn't need the repo)
+    $tmpDir = Join-Path $env:TEMP "conch-install"
+    New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+    $tmpDir
+}
 
 function Write-Success  { Write-Host "[+] $args" -ForegroundColor Green }
 function Write-Warn     { Write-Host "[!] $args" -ForegroundColor Yellow }
