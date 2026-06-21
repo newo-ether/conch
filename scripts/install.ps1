@@ -871,6 +871,11 @@ Write-Host "    Start:       nssm start $ServiceName"
 Write-Host "    Status:      nssm status $ServiceName"
 Write-Host "    Uninstall:   .\install.ps1 -Uninstall"
 Write-Host ""
+Write-Host "  ${Yellow}Change API key:${Reset} (editing env.txt alone is NOT enough on Windows)"
+Write-Host "    1. Edit config:  notepad $EnvFile"
+Write-Host "    2. Reload env:   nssm set $ServiceName AppEnvironmentExtra (Get-Content $EnvFile)"
+Write-Host "    3. Restart:      nssm restart $ServiceName"
+Write-Host ""
 
 } catch {
     Write-Host ""
