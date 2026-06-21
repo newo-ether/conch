@@ -342,7 +342,7 @@ if $DO_UNINSTALL; then
         if [ -d "${SVC_DIR}" ]; then
             FOUND=true
             sv stop conch >/dev/null 2>&1 || true
-            rm -rf "${SVC_DIR}"
+            chmod -R u+w "${SVC_DIR}" 2>/dev/null || true; rm -rf "${SVC_DIR}" || true
             ok "runit service removed"
         fi
         if [ -f "${BOOT_DIR}/01-conch" ]; then
@@ -400,7 +400,7 @@ if $EXISTING; then
         fi
         if [ "$PLATFORM" = "termux" ] && [ -d "${SVC_DIR}" ]; then
             sv stop conch >/dev/null 2>&1 || true
-            rm -rf "${SVC_DIR}"
+            chmod -R u+w "${SVC_DIR}" 2>/dev/null || true; rm -rf "${SVC_DIR}" || true
             ok "runit service removed"
         fi
         rm -f "${BIN_PATH}" "${MCP_BIN_PATH}"
