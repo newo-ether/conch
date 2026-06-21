@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,10 +13,18 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/newo-ether/conch/crypto"
 )
 
 const maxFileSize = 1 << 20 // 1 MB
+
+// grepMaxFileSize bounds per-file reads during grep so a single huge file cannot
+// exhaust memory; mirrors the 500 KB cap used by the on-device sandbox backend.
+const grepMaxFileSize = 500 * 1024
+
+// grepMaxContentLen truncates a returned matching line, matching the other backends.
+const grepMaxContentLen = 500
 
 // FileReadRequest is the decrypted body for POST /file/read.
 type FileReadRequest struct {
@@ -40,9 +50,10 @@ type FileWriteResponse struct {
 }
 
 // FileGlobRequest is the decrypted body for POST /file/glob.
-// Depth is optional: nil preserves the legacy single-level glob; a non-nil value
-// switches to a recursive walk limited to that many directory levels below Path,
-// where 0 (or any value <= 0) means unlimited recursion.
+// Depth is optional: nil or <= 0 means unlimited recursion below Path (matching
+// the sandbox/SSH backends); a value >= 1 limits the walk to that many directory
+// levels below Path (1 = Path itself only). A bare Pattern (no '/') matches file
+// basenames at any depth; patterns may use '**' for recursive segment matching.
 type FileGlobRequest struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path"`
@@ -277,18 +288,12 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Path, _ = os.UserHomeDir()
 	}
 
-	var matches []string
-	if req.Depth == nil {
-		// Legacy behavior: single-level glob, fully backward compatible.
-		matches, err = filepath.Glob(filepath.Join(req.Path, req.Pattern))
-		if err != nil {
-			writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("glob: %v", err)}, aesKey)
-			return
-		}
-	} else {
-		// Recursive walk limited to *req.Depth directory levels (<= 0 means unlimited).
-		matches = globWithDepth(req.Path, req.Pattern, *req.Depth)
+	// nil / <= 0 → unlimited recursion (consistent with the sandbox & SSH backends).
+	maxDepth := 0
+	if req.Depth != nil && *req.Depth > 0 {
+		maxDepth = *req.Depth
 	}
+	matches := globWithDepth(req.Path, req.Pattern, maxDepth)
 
 	if len(matches) > 1000 {
 		matches = matches[:1000]
@@ -300,13 +305,21 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, FileGlobResponse{Files: matches}, aesKey)
 }
 
-// globWithDepth walks root and returns files whose basename matches pattern,
-// descending at most maxDepth directory levels below root. maxDepth <= 0 means
-// unlimited. A file directly inside root counts as depth 1.
+// globWithDepth recursively walks root and returns files matching pattern,
+// descending at most maxDepth directory levels below root (maxDepth <= 0 =
+// unlimited; a file directly inside root is depth 1). A bare pattern (no '/')
+// matches basenames at any depth; otherwise the pattern is matched against the
+// path relative to root. '**' is supported via doublestar, giving the same
+// semantics as the Java PathMatcher used by the Kotlin backends.
 func globWithDepth(root, pattern string, maxDepth int) []string {
 	matches := make([]string, 0)
 	rootClean := filepath.Clean(root)
 	rootSeps := strings.Count(rootClean, string(os.PathSeparator))
+	// A separator-less pattern matches file names at any depth.
+	matchPattern := pattern
+	if !strings.Contains(pattern, "/") {
+		matchPattern = "**/" + pattern
+	}
 	filepath.Walk(rootClean, func(path string, info os.FileInfo, err error) error {
 		if err != nil || path == rootClean {
 			return nil
@@ -321,7 +334,11 @@ func globWithDepth(root, pattern string, maxDepth int) []string {
 		if maxDepth > 0 && level > maxDepth {
 			return nil
 		}
-		if ok, _ := filepath.Match(pattern, filepath.Base(path)); ok {
+		rel, relErr := filepath.Rel(rootClean, path)
+		if relErr != nil {
+			return nil
+		}
+		if ok, _ := doublestar.Match(matchPattern, filepath.ToSlash(rel)); ok {
 			matches = append(matches, path)
 			if len(matches) >= 1000 {
 				return filepath.SkipAll
@@ -390,23 +407,13 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if globFunc != nil && !globFunc(path) {
 			return nil
 		}
-
-		content, err := os.ReadFile(path)
-		if err != nil {
+		// Skip oversized files so a single huge file can't exhaust memory.
+		if info.Size() > grepMaxFileSize {
 			return nil
 		}
-
-		for i, line := range strings.Split(string(content), "\n") {
-			if re.MatchString(line) {
-				matches = append(matches, GrepMatch{
-					Path:    path,
-					Line:    i + 1,
-					Content: line,
-				})
-				if len(matches) >= 500 {
-					return filepath.SkipAll
-				}
-			}
+		grepFile(path, re, &matches)
+		if len(matches) >= 500 {
+			return filepath.SkipAll
 		}
 		return nil
 	})
@@ -417,4 +424,37 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSONResponse(w, FileGrepResponse{Matches: matches}, aesKey)
+}
+
+// grepFile streams a single file line-by-line, appending matches (up to the
+// global 500 cap) to matches. Binary files — detected by a NUL byte in the head,
+// the same heuristic grep uses — are skipped so they don't emit garbage matches.
+func grepFile(path string, re *regexp.Regexp, matches *[]GrepMatch) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	br := bufio.NewReader(f)
+	if head, _ := br.Peek(512); bytes.IndexByte(head, 0) >= 0 {
+		return // binary file
+	}
+
+	scanner := bufio.NewScanner(br)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := scanner.Text()
+		if re.MatchString(line) {
+			if len(line) > grepMaxContentLen {
+				line = line[:grepMaxContentLen]
+			}
+			*matches = append(*matches, GrepMatch{Path: path, Line: lineNo, Content: line})
+			if len(*matches) >= 500 {
+				return
+			}
+		}
+	}
 }
