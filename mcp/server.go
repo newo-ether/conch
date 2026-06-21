@@ -212,25 +212,44 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 		return nil, &Error{Code: -32602, Message: "invalid params"}
 	}
 
-	transport, errText := s.resolveDevice(p.Arguments)
-	if errText != "" {
-		return errorResult(errText), nil
-	}
-
 	switch p.Name {
 	case "list_devices":
 		return s.doListDevices(), nil
 	case "shell_execute":
+		transport, errText := s.resolveDevice(p.Arguments)
+		if errText != "" {
+			return errorResult(errText), nil
+		}
 		return s.doShellExecute(ctx, transport, p.Arguments)
 	case "file_read":
+		transport, errText := s.resolveDevice(p.Arguments)
+		if errText != "" {
+			return errorResult(errText), nil
+		}
 		return s.doFileRead(ctx, transport, p.Arguments)
 	case "file_write":
+		transport, errText := s.resolveDevice(p.Arguments)
+		if errText != "" {
+			return errorResult(errText), nil
+		}
 		return s.doFileWrite(ctx, transport, p.Arguments)
 	case "file_edit":
+		transport, errText := s.resolveDevice(p.Arguments)
+		if errText != "" {
+			return errorResult(errText), nil
+		}
 		return s.doFileEdit(ctx, transport, p.Arguments)
 	case "file_glob":
+		transport, errText := s.resolveDevice(p.Arguments)
+		if errText != "" {
+			return errorResult(errText), nil
+		}
 		return s.doFileGlob(ctx, transport, p.Arguments)
 	case "file_grep":
+		transport, errText := s.resolveDevice(p.Arguments)
+		if errText != "" {
+			return errorResult(errText), nil
+		}
 		return s.doFileGrep(ctx, transport, p.Arguments)
 	default:
 		return nil, &Error{Code: -32602, Message: fmt.Sprintf("unknown tool: %s", p.Name)}
