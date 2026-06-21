@@ -80,6 +80,8 @@ param(
 
 & {
 
+try {
+
 $ErrorActionPreference = "Stop"
 $Host.UI.RawUI.WindowTitle = "Conch Installer"
 
@@ -130,17 +132,6 @@ function Retry-Command {
     throw $lastError
 }
 
-# Global error trap — attempt rollback on fatal error
-trap {
-    Write-Err "FATAL: $($_.Exception.Message)"
-    Invoke-Rollback
-    Write-Host ""
-    Write-Err "Installation failed. The system has been restored to its previous state."
-    Write-Host "  For manual installation help: https://github.com/newo-ether/conch"
-    Write-Host ""
-    exit 1
-}
-
 # ============================================================================
 # Output helpers
 # ============================================================================
@@ -171,7 +162,7 @@ function Write-ErrorExit {
     Write-Err $Message
     if (-not $NoRollback) { Invoke-Rollback }
     Write-Host ""
-    exit 1
+    throw $Message
 }
 
 # ANSI color codes (fallback for older consoles)
@@ -229,7 +220,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] `
 if (-not $isAdmin) {
     Write-Err "Administrator privileges required."
     Write-Host "    Right-click PowerShell -> Run as Administrator, then re-run."
-    exit 1
+    throw "Administrator privileges required."
 }
 Write-OK "Administrator"
 
@@ -261,8 +252,22 @@ if (-not $Uninstall -and -not $BinaryPath) {
 
 # --- Port conflict check ---
 if (-not $Uninstall) {
-    $portInUse = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
-        Where-Object { $_.State -eq "Listen" }
+    $portInUse = $null
+    try {
+        $portInUse = Get-NetTCPConnection -LocalPort $Port -ErrorAction Stop |
+            Where-Object { $_.State -eq "Listen" }
+    } catch {
+        # Fallback for systems without NetTCPIP module (Server Core, older Windows)
+        $netstat = cmd /c "netstat -ano 2>nul" 2>$null
+        if ($netstat) {
+            $match = $netstat | Select-String ":$Port\s+.*LISTENING"
+            if ($match) {
+                $parts = $match -split '\s+'
+                $pid = $parts[-1]
+                $portInUse = [PSCustomObject]@{ OwningProcess = [int]$pid }
+            }
+        }
+    }
     if ($portInUse) {
         $proc = Get-Process -Id $portInUse.OwningProcess -ErrorAction SilentlyContinue
         $procName = if ($proc) { $proc.ProcessName } else { "unknown" }
@@ -270,7 +275,7 @@ if (-not $Uninstall) {
         if (-not $Yes) {
             if (-not (Prompt-User "Continue anyway?" -Default "Y")) {
                 Write-Info "Aborted. Choose a different port with -Port <number>"
-                exit 0
+                return
             }
         }
     } else {
@@ -380,13 +385,13 @@ if ($Uninstall) {
 
     if (-not $existingSvc -and -not $existingDir) {
         Write-Warn "No existing Conch installation found."
-        exit 0
+        return
     }
 
     if (-not $Yes) {
         if (-not (Prompt-User "Remove Conch completely (service + files)?" -Default "Y")) {
             Write-Info "Aborted by user."
-            exit 0
+            return
         }
     }
 
@@ -413,7 +418,7 @@ if ($Uninstall) {
     Write-Host ""
     Write-OK "Conch has been uninstalled."
     Write-Host ""
-    exit 0
+    return
 }
 
 # ============================================================================
@@ -469,7 +474,7 @@ function Download-File {
     $url = "$GitHubReleases/$Name"
     Write-Info "Downloading $Name..."
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $client = New-Object System.Net.WebClient
         $client.Headers.Add("User-Agent", "Conch-Installer/1.0")
         Retry-Command -Script {
@@ -645,7 +650,7 @@ if (-not $ApiKey) {
     }
     if (-not $ApiKey) {
         $bytes = New-Object byte[] 32
-        [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+        (New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
         $ApiKey = [Convert]::ToBase64String($bytes).TrimEnd('=')
         Write-OK "Generated new API key"
     }
@@ -830,5 +835,15 @@ Write-Host "    Start:       nssm start $ServiceName"
 Write-Host "    Status:      nssm status $ServiceName"
 Write-Host "    Uninstall:   .\install.ps1 -Uninstall"
 Write-Host ""
+
+} catch {
+    Write-Host ""
+    Write-Err "FATAL: $($_.Exception.Message)"
+    Invoke-Rollback
+    Write-Host ""
+    Write-Err "Installation failed. The system has been restored to its previous state."
+    Write-Host "  For manual installation help: https://github.com/newo-ether/conch"
+    Write-Host ""
+}
 
 }
