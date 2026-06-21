@@ -16,6 +16,14 @@ const serverVersion = "0.1.0"
 
 var allTools = []Tool{
 	{
+		Name:        "list_devices",
+		Description: "List all configured remote devices with their names, descriptions, and connection URLs. Use this to discover available devices before running commands on them.",
+		InputSchema: JSONSchema{
+			Type:       "object",
+			Properties: map[string]JSONProp{},
+		},
+	},
+	{
 		Name:        "shell_execute",
 		Description: "Execute a shell command on a remote server via Conch. The command runs in a non-interactive shell (/bin/sh -c or powershell). Output is streamed line-by-line with stdout/stderr markers. Returns the combined output lines and exit code.",
 		InputSchema: JSONSchema{
@@ -103,10 +111,11 @@ var allTools = []Tool{
 // Server is a stdio-based MCP server.
 type Server struct {
 	transports map[string]*Transport
+	devices    map[string]DeviceConfig
 }
 
-func NewServer(transports map[string]*Transport) *Server {
-	return &Server{transports: transports}
+func NewServer(transports map[string]*Transport, devices map[string]DeviceConfig) *Server {
+	return &Server{transports: transports, devices: devices}
 }
 
 // Run starts the stdio read-eval loop. Blocks until stdin closes.
@@ -209,6 +218,8 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 	}
 
 	switch p.Name {
+	case "list_devices":
+		return s.doListDevices(), nil
 	case "shell_execute":
 		return s.doShellExecute(ctx, transport, p.Arguments)
 	case "file_read":
@@ -242,6 +253,32 @@ func (s *Server) resolveDevice(args map[string]interface{}) (*Transport, string)
 		return nil, fmt.Sprintf("unknown device '%s'. Available: %v", device, deviceNames(s.transports))
 	}
 	return t, ""
+}
+
+// --- list_devices ---
+
+func (s *Server) doListDevices() ToolCallResult {
+	type DeviceInfo struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		URL         string `json:"url"`
+	}
+	var devices []DeviceInfo
+	for name, cfg := range s.devices {
+		devices = append(devices, DeviceInfo{
+			Name:        name,
+			Description: cfg.Description,
+			URL:         cfg.URL,
+		})
+	}
+	// Fallback: list transports if no device configs stored
+	if len(devices) == 0 {
+		for name := range s.transports {
+			devices = append(devices, DeviceInfo{Name: name})
+		}
+	}
+	data, _ := json.Marshal(devices)
+	return textResult(string(data))
 }
 
 // --- shell_execute ---

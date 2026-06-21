@@ -16,9 +16,9 @@ func main() {
 	log.SetPrefix("[conch-mcp] ")
 
 	transports := make(map[string]*mcp.Transport)
+	var devices map[string]mcp.DeviceConfig
 
 	if devicesJSON := os.Getenv("CONCH_DEVICES"); devicesJSON != "" {
-		var devices map[string]mcp.DeviceConfig
 		if err := json.Unmarshal([]byte(devicesJSON), &devices); err != nil {
 			log.Fatalf("CONCH_DEVICES is invalid JSON: %v", err)
 		}
@@ -57,7 +57,7 @@ func main() {
 		transports["default"] = t
 	}
 
-	server := mcp.NewServer(transports)
+	server := mcp.NewServer(transports, devices)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
