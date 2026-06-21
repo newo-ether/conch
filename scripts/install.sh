@@ -706,7 +706,7 @@ fi
 # ============================================================================
 # Done
 # ============================================================================
-local rpad=$((46 - 2 - 21))  # "Installation Complete" = 21 chars
+rpad=$((46 - 2 - 21))  # "Installation Complete" = 21 chars
 echo ""
 echo "  ${GREEN}╔══════════════════════════════════════════════╗${RESET}"
 printf "  ${GREEN}║  ${BOLD}%s${RESET}%*s${GREEN}║${RESET}\n" "Installation Complete" "$rpad" ""
