@@ -20,9 +20,16 @@ A lightweight, zero-dependency shell execution server with SSE streaming and end
 
 ### One-click (recommended)
 
-**Linux / Termux:**
+The script auto-detects your platform, downloads pre-built binaries from GitHub Releases, generates an API key, and registers a system service.
+
+**Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.sh | sudo bash
+```
+
+**Termux (Android):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.sh | bash
 ```
 
 **Windows (PowerShell as Administrator):**
@@ -30,17 +37,15 @@ curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/insta
 Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.ps1 | iex
 ```
 
-The script auto-detects your platform, downloads the pre-built binary from GitHub Releases, generates an API key, and registers a system service.
-
 Custom options:
 ```bash
-# Linux: custom port and key
+# Linux
 sudo ./scripts/install.sh --port 14216 --api-key "your-key"
 
-# Termux (no root needed)
+# Termux
 ./scripts/install.sh --port 8080
 
-# Windows: custom port and key
+# Windows
 .\scripts\install.ps1 -Port 14216 -ApiKey "your-key"
 ```
 

@@ -18,9 +18,16 @@
 
 ## 一键安装
 
-**Linux / Termux：**
+脚本自动检测平台，下载预编译二进制，生成 API 密钥，注册系统服务。
+
+**Linux：**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.sh | sudo bash
+```
+
+**Termux（Android）：**
+```bash
+curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.sh | bash
 ```
 
 **Windows（以管理员身份运行 PowerShell）：**
@@ -28,17 +35,15 @@ curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/insta
 Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.ps1 | iex
 ```
 
-脚本会自动完成：下载对应平台的预编译二进制 → 生成 API 密钥 → 注册系统服务。
-
 自定义安装：
 ```bash
-# 指定端口和密钥
+# Linux
 sudo ./scripts/install.sh --port 14216 --api-key "your-key"
 
-# Termux（无需 root）
+# Termux
 ./scripts/install.sh --port 8080
 
-# Windows 自定义端口
+# Windows
 .\scripts\install.ps1 -Port 8080 -ApiKey "your-key"
 ```
 
