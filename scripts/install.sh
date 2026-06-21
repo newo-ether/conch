@@ -629,10 +629,12 @@ UNIT
     fi
 
 elif [ "$PLATFORM" = "termux" ]; then
-    # Stop existing if running
-    sv stop conch 2>/dev/null || true
-
     mkdir -p "${SVC_DIR}"
+
+    # Only try to stop if the supervise directory already existed (from a prior install)
+    if [ -f "${SVC_DIR}/run" ]; then
+        sv stop conch 2>/dev/null || true
+    fi
 
     cat > "${SVC_DIR}/run" <<'RUN'
 #!/data/data/com.termux/files/usr/bin/sh
