@@ -338,7 +338,7 @@ if $DO_UNINSTALL; then
     if [ "$PLATFORM" = "termux" ]; then
         if [ -d "${SVC_DIR}" ]; then
             FOUND=true
-            sv stop conch 2>/dev/null || true
+            sv stop conch >/dev/null 2>&1 || true
             rm -rf "${SVC_DIR}"
             ok "runit service removed"
         fi
@@ -396,7 +396,7 @@ if $EXISTING; then
             ok "systemd service removed"
         fi
         if [ "$PLATFORM" = "termux" ] && [ -d "${SVC_DIR}" ]; then
-            sv stop conch 2>/dev/null || true
+            sv stop conch >/dev/null 2>&1 || true
             rm -rf "${SVC_DIR}"
             ok "runit service removed"
         fi
@@ -637,7 +637,7 @@ elif [ "$PLATFORM" = "termux" ]; then
 
     # Only try to stop if the supervise directory already existed (from a prior install)
     if [ -f "${SVC_DIR}/run" ]; then
-        sv stop conch 2>/dev/null || true
+        sv stop conch >/dev/null 2>&1 || true
     fi
 
     cat > "${SVC_DIR}/run" <<'RUN'
@@ -695,8 +695,10 @@ BOOT
     fi
 
     if $DO_START; then
-        sv up conch
-        sleep 2
+        # runsvdir may need a moment to notice the new directory
+        sleep 1
+        sv up conch >/dev/null 2>&1 || { sleep 2; sv up conch >/dev/null 2>&1; } || true
+        sleep 1
         ok "Service started"
     else
         info "Service installed but not started. Start with: sv up conch"
