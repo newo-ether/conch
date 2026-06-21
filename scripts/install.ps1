@@ -536,7 +536,7 @@ $Step++
 # ============================================================================
 # Step 3 — Acquire binary
 # ============================================================================
-Write-Step $Step $TotalSteps "Acquiring conch binary..."
+Write-Step $Step $TotalSteps "Acquiring binaries..."
 
 function Download-File {
     param([string]$Name, [string]$Dest)
@@ -625,6 +625,40 @@ if (-not (Test-ValidBinary $SrcBin)) {
     Write-Warn "  Installation may succeed but the server might not work."
 }
 
+# --- MCP binary acquisition (same step) ---
+$SrcMcp = $null
+if ($McpBinaryPath) {
+    if (-not (Test-Path $McpBinaryPath)) {
+        Write-Warn "MCP binary not found: $McpBinaryPath — skipping conch-mcp"
+    } else {
+        $SrcMcp = Resolve-Path $McpBinaryPath
+        Write-OK "Using provided MCP binary: $SrcMcp"
+    }
+} elseif (Download-File $McpBinName "$RepoDir\conch-mcp.exe") {
+    $SrcMcp = "$RepoDir\conch-mcp.exe"
+} else {
+    $GoBin = Get-Command go -ErrorAction SilentlyContinue
+    if ($GoBin -and (Test-Path "$RepoDir\go.mod")) {
+        Write-Info "Building conch-mcp from source..."
+        Push-Location $RepoDir
+        try {
+            & go build -o conch-mcp.exe ./cmd/mcp
+            if ($LASTEXITCODE -ne 0) { throw "go build mcp failed with exit code $LASTEXITCODE" }
+            $SrcMcp = "$RepoDir\conch-mcp.exe"
+            Write-OK "MCP built from source"
+        } catch {
+            Write-Warn "Failed to build conch-mcp: $($_.Exception.Message)"
+        } finally { Pop-Location }
+    } elseif (Test-Path "$RepoDir\conch-mcp.exe") {
+        $SrcMcp = "$RepoDir\conch-mcp.exe"
+    } elseif (Get-Command conch-mcp -ErrorAction SilentlyContinue) {
+        $SrcMcp = (Get-Command conch-mcp).Source
+    }
+}
+if (-not $SrcMcp) {
+    Write-Warn "conch-mcp not available — MCP bridge will not be installed"
+}
+
 $Step++
 
 # ============================================================================
@@ -663,42 +697,8 @@ function Copy-IfDifferent {
 }
 
 Copy-IfDifferent $SrcBin $BinPath "conch.exe"
-
-# MCP binary
-$SrcMcp = $null
-if ($McpBinaryPath) {
-    if (-not (Test-Path $McpBinaryPath)) {
-        Write-Warn "MCP binary not found: $McpBinaryPath — skipping conch-mcp"
-    } else {
-        $SrcMcp = Resolve-Path $McpBinaryPath
-        Write-OK "Using provided MCP binary"
-    }
-} elseif (Download-File $McpBinName "$RepoDir\conch-mcp.exe") {
-    $SrcMcp = "$RepoDir\conch-mcp.exe"
-} else {
-    $GoBin = Get-Command go -ErrorAction SilentlyContinue
-    if ($GoBin -and (Test-Path "$RepoDir\go.mod")) {
-        Write-Info "Building conch-mcp from source..."
-        Push-Location $RepoDir
-        try {
-            & go build -o conch-mcp.exe ./cmd/mcp
-            if ($LASTEXITCODE -ne 0) { throw "go build mcp failed with exit code $LASTEXITCODE" }
-            $SrcMcp = "$RepoDir\conch-mcp.exe"
-            Write-OK "MCP built from source"
-        } catch {
-            Write-Warn "Failed to build conch-mcp: $($_.Exception.Message)"
-        } finally { Pop-Location }
-    } elseif (Test-Path "$RepoDir\conch-mcp.exe") {
-        $SrcMcp = "$RepoDir\conch-mcp.exe"
-    } elseif (Get-Command conch-mcp -ErrorAction SilentlyContinue) {
-        $SrcMcp = (Get-Command conch-mcp).Source
-    }
-}
-
 if ($SrcMcp) {
     Copy-IfDifferent $SrcMcp $McpBinPath "conch-mcp.exe"
-} else {
-    Write-Warn "conch-mcp not available — MCP bridge will not be installed"
 }
 
 $Step++
@@ -725,10 +725,6 @@ if (-not $ApiKey) {
     }
 }
 
-$maskedKey = if ($ApiKey.Length -gt 8) {
-    $ApiKey.Substring(0, 4) + "..." + $ApiKey.Substring($ApiKey.Length - 4)
-} else { $ApiKey }
-
 $configContent = @"
 CONCH_API_KEY=$ApiKey
 CONCH_PORT=$Port
@@ -740,7 +736,7 @@ CONCH_ALLOW_NO_AUTH=$($NoAuth.ToString().ToLower())
 
 Write-AtomicConfig $configContent $EnvFile
 Write-OK "Config written: $EnvFile"
-Write-Info "API key: $maskedKey"
+Write-Info "API key: $ApiKey"
 
 if ($NoAuth) {
     Write-Warn "Authentication is DISABLED — do not expose to untrusted networks!"
@@ -862,7 +858,7 @@ Write-Host "  ║  ${Bold}Installation Complete${Reset}                         
 Write-Host "  ╚══════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 Write-Host "  ${Cyan}Health check:${Reset}   curl.exe -s http://localhost:$Port/health"
-Write-Host "  ${Cyan}API key:${Reset}       $maskedKey"
+Write-Host "  ${Cyan}API key:${Reset}       $ApiKey"
 Write-Host "  ${Cyan}Config file:${Reset}   $EnvFile"
 Write-Host ""
 Write-Host "  ${Cyan}Manage:${Reset}"

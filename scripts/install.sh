@@ -409,7 +409,7 @@ STEP=$((STEP + 1))
 # ============================================================================
 # Step 3 — Acquire binary
 # ============================================================================
-step $STEP $TOTAL_STEPS "Acquiring conch binary..."
+step $STEP $TOTAL_STEPS "Acquiring binaries..."
 
 SRC=""
 if [ -n "${SRC_BIN}" ]; then
@@ -453,6 +453,37 @@ if ! valid_binary "$SRC"; then
     warn "  Installation may succeed but the server might not work."
 fi
 
+# --- MCP binary acquisition (same step) ---
+SRC_MCP_FINAL=""
+if [ -n "${SRC_MCP}" ]; then
+    if [ ! -f "${SRC_MCP}" ]; then
+        warn "MCP binary not found: ${SRC_MCP} — skipping conch-mcp"
+    else
+        SRC_MCP_FINAL="${SRC_MCP}"
+        ok "Using provided MCP binary: ${SRC_MCP}"
+    fi
+elif download_binary "${MCP_BIN_NAME}" "${REPO_DIR}/conch-mcp"; then
+    SRC_MCP_FINAL="${REPO_DIR}/conch-mcp"
+else
+    if command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
+        info "Building conch-mcp from source..."
+        if (cd "${REPO_DIR}" && go build -o conch-mcp ./cmd/mcp); then
+            SRC_MCP_FINAL="${REPO_DIR}/conch-mcp"
+            ok "MCP built from source"
+        else
+            warn "Failed to build conch-mcp"
+        fi
+    elif [ -f "${REPO_DIR}/conch-mcp" ]; then
+        SRC_MCP_FINAL="${REPO_DIR}/conch-mcp"
+    elif command -v conch-mcp &>/dev/null; then
+        SRC_MCP_FINAL="$(command -v conch-mcp)"
+        ok "Using conch-mcp from PATH"
+    fi
+fi
+if [ -z "$SRC_MCP_FINAL" ]; then
+    warn "conch-mcp not available — MCP bridge will not be installed"
+fi
+
 STEP=$((STEP + 1))
 
 # ============================================================================
@@ -474,39 +505,8 @@ copy_if_different() {
 }
 
 copy_if_different "$SRC" "${BIN_PATH}" "conch"
-
-# MCP binary
-SRC_MCP_FINAL=""
-if [ -n "${SRC_MCP}" ]; then
-    if [ ! -f "${SRC_MCP}" ]; then
-        warn "MCP binary not found: ${SRC_MCP} — skipping conch-mcp"
-    else
-        SRC_MCP_FINAL="${SRC_MCP}"
-        ok "Using provided MCP binary"
-    fi
-elif download_binary "${MCP_BIN_NAME}" "${REPO_DIR}/conch-mcp"; then
-    SRC_MCP_FINAL="${REPO_DIR}/conch-mcp"
-else
-    if command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
-        info "Building conch-mcp from source..."
-        if (cd "${REPO_DIR}" && go build -o conch-mcp ./cmd/mcp); then
-            SRC_MCP_FINAL="${REPO_DIR}/conch-mcp"
-            ok "MCP built from source"
-        else
-            warn "Failed to build conch-mcp"
-        fi
-    elif [ -f "${REPO_DIR}/conch-mcp" ]; then
-        SRC_MCP_FINAL="${REPO_DIR}/conch-mcp"
-    elif command -v conch-mcp &>/dev/null; then
-        SRC_MCP_FINAL="$(command -v conch-mcp)"
-        ok "Using conch-mcp from PATH"
-    fi
-fi
-
 if [ -n "$SRC_MCP_FINAL" ]; then
     copy_if_different "$SRC_MCP_FINAL" "${MCP_BIN_PATH}" "conch-mcp"
-else
-    warn "conch-mcp not available — MCP bridge will not be installed"
 fi
 
 STEP=$((STEP + 1))
@@ -531,11 +531,6 @@ if [ -z "${API_KEY}" ]; then
     fi
 fi
 
-MASKED_KEY="${API_KEY}"
-if [ ${#API_KEY} -gt 8 ]; then
-    MASKED_KEY="${API_KEY:0:4}...${API_KEY: -4}"
-fi
-
 cat > "${ENV_FILE}.tmp.$$" <<EOF
 CONCH_API_KEY=${API_KEY}
 CONCH_PORT=${PORT}
@@ -548,7 +543,7 @@ chmod 600 "${ENV_FILE}.tmp.$$"
 mv -f "${ENV_FILE}.tmp.$$" "${ENV_FILE}"
 
 ok "Config written: ${ENV_FILE}"
-info "API key: ${MASKED_KEY}"
+info "API key: ${API_KEY}"
 
 if $ALLOW_NO_AUTH; then
     warn "Authentication is DISABLED — do not expose to untrusted networks!"
@@ -711,7 +706,7 @@ echo "  ${GREEN}║  ${BOLD}Installation Complete${RESET}                       
 echo "  ${GREEN}╚══════════════════════════════════════════════╝${RESET}"
 echo ""
 echo "  ${CYAN}Health check:${RESET}   curl -s http://localhost:${PORT}/health"
-echo "  ${CYAN}API key:${RESET}       ${MASKED_KEY}"
+echo "  ${CYAN}API key:${RESET}       ${API_KEY}"
 echo "  ${CYAN}Config file:${RESET}   ${ENV_FILE}"
 echo ""
 if [ "$PLATFORM" = "linux" ]; then
