@@ -78,6 +78,8 @@ param(
     [switch]$Uninstall     = $false
 )
 
+& {
+
 $ErrorActionPreference = "Stop"
 $Host.UI.RawUI.WindowTitle = "Conch Installer"
 
@@ -828,3 +830,5 @@ Write-Host "    Start:       nssm start $ServiceName"
 Write-Host "    Status:      nssm status $ServiceName"
 Write-Host "    Uninstall:   .\install.ps1 -Uninstall"
 Write-Host ""
+
+}
