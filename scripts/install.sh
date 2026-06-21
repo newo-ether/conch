@@ -251,7 +251,7 @@ fi
 if [ -f "$0" ] && [ "$(basename "$0")" != "bash" ]; then
     REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 else
-    REPO_DIR="$(mktemp -d /tmp/conch-install.XXXXXX)"
+    REPO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/conch-install.XXXXXX")"
     push_rollback "rm -rf $REPO_DIR"
 fi
 
