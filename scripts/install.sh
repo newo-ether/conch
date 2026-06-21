@@ -667,7 +667,7 @@ RUN
     SETUP_BOOT=false
     if ! $NO_START && ! $YES_ALL; then
         echo ""
-        prompt "Enable auto-start on boot? (requires termux-boot)" "y" && SETUP_BOOT=true
+        prompt "Enable auto-start on boot? (requires Termux:Boot app)" "y" && SETUP_BOOT=true
     elif ! $NO_START; then
         SETUP_BOOT=true
     fi
@@ -681,8 +681,9 @@ BOOT
             chmod 755 "${BOOT_DIR}/01-conch"
             ok "Boot script installed"
         else
-            warn "termux-boot directory not found. Auto-start on boot NOT set up."
-            warn "  pkg install termux-boot && mkdir -p ~/.termux/boot"
+            warn "Termux:Boot directory not found. Auto-start on boot NOT set up."
+            warn "  Install Termux:Boot APK from F-Droid: https://f-droid.org/packages/com.termux.boot/"
+            warn "  Open the app once, then: mkdir -p ~/.termux/boot"
             warn "  Then re-run this installer."
         fi
     fi
