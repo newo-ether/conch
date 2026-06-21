@@ -215,7 +215,11 @@ if ($BinaryPath) {
 
 # --- Install binary ---
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Copy-Item -Force $SrcBin $BinPath
+if ((Resolve-Path $SrcBin).Path -ne (Resolve-Path $BinPath).Path) {
+    Copy-Item -Force $SrcBin $BinPath
+} else {
+    Write-Warn "Source and destination are the same file, skipping copy"
+}
 Write-Success "Installed: $BinPath"
 
 # --- Build or locate MCP binary ---
@@ -254,7 +258,11 @@ if ($McpBinaryPath) {
 }
 
 if ($SrcMcp) {
-    Copy-Item -Force $SrcMcp $McpBinPath
+    if ((Resolve-Path $SrcMcp).Path -ne (Resolve-Path $McpBinPath).Path) {
+        Copy-Item -Force $SrcMcp $McpBinPath
+    } else {
+        Write-Warn "MCP source and destination are the same file, skipping copy"
+    }
     Write-Success "Installed: $McpBinPath"
 }
 
