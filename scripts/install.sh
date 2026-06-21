@@ -39,10 +39,14 @@ if [ -t 1 ] || [ -n "${TERM:-}" ]; then
 fi
 
 banner() {
+    local title="${PLATFORM^} Installer"
+    # Box internal width = 46 (48 total with ║ borders)
+    local pad1=$((46 - 10 - 18))   # "Conch Shell Server" = 18 chars
+    local pad2=$((46 - 10 - ${#title}))
     echo ""
     echo "  ${CYAN}╔══════════════════════════════════════════════╗${RESET}"
-    echo "  ${CYAN}║          Conch Shell Server                  ║${RESET}"
-    echo "  ${CYAN}║          ${PLATFORM^} Installer                      ║${RESET}"
+    printf "  ${CYAN}║          %s%*s║${RESET}\n" "Conch Shell Server" "$pad1" ""
+    printf "  ${CYAN}║          %s%*s║${RESET}\n" "$title" "$pad2" ""
     echo "  ${CYAN}╚══════════════════════════════════════════════╝${RESET}"
     echo ""
 }
@@ -702,9 +706,10 @@ fi
 # ============================================================================
 # Done
 # ============================================================================
+local rpad=$((46 - 2 - 21))  # "Installation Complete" = 21 chars
 echo ""
 echo "  ${GREEN}╔══════════════════════════════════════════════╗${RESET}"
-echo "  ${GREEN}║  ${BOLD}Installation Complete${RESET}                          ${GREEN}║${RESET}"
+printf "  ${GREEN}║  ${BOLD}%s${RESET}%*s${GREEN}║${RESET}\n" "Installation Complete" "$rpad" ""
 echo "  ${GREEN}╚══════════════════════════════════════════════╝${RESET}"
 echo ""
 echo "  ${CYAN}Health check:${RESET}   curl -s http://localhost:${PORT}/health"

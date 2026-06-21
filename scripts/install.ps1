@@ -137,10 +137,13 @@ function Retry-Command {
 # ============================================================================
 
 function Write-Banner {
+    $boxW = 46  # internal width between box borders
+    $t1 = "Conch Shell Server"
+    $t2 = "Windows Installer"
     Write-Host ""
     Write-Host "  ╔══════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║          Conch Shell Server                  ║" -ForegroundColor Cyan
-    Write-Host "  ║          Windows Installer                   ║" -ForegroundColor Cyan
+    Write-Host ("  ║          {0}{1}║" -f $t1, (' ' * ($boxW - 10 - $t1.Length))) -ForegroundColor Cyan
+    Write-Host ("  ║          {0}{1}║" -f $t2, (' ' * ($boxW - 10 - $t2.Length))) -ForegroundColor Cyan
     Write-Host "  ╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
 }
@@ -853,8 +856,9 @@ if ($DoStart) {
 # Done
 # ============================================================================
 Write-Host ""
+$boxW = 46; $t = "Installation Complete"
 Write-Host "  ╔══════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "  ║  ${Bold}Installation Complete${Reset}                          " -ForegroundColor Green
+Write-Host ("  ║  ${Bold}{0}${Reset}{1}║" -f $t, (' ' * ($boxW - 2 - $t.Length))) -ForegroundColor Green
 Write-Host "  ╚══════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 Write-Host "  ${Cyan}Health check:${Reset}   curl.exe -s http://localhost:$Port/health"
