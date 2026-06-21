@@ -1,79 +1,160 @@
 #!/usr/bin/env bash
+# Install Conch Shell Server on Linux / Termux.
+# Safe to run directly or via: curl -fsSL <url> | bash
 set -euo pipefail
 
-# --- Defaults ---
+# ============================================================================
+# Wrapped in subshell so 'exit' does not kill the user's shell when piped.
+# ============================================================================
+(
+
+# ============================================================================
+# Defaults
+# ============================================================================
 DEFAULT_PORT=14216
 DEFAULT_HOST="0.0.0.0"
 DEFAULT_TIMEOUT=30
 DEFAULT_MAX_TIMEOUT=120
 
-# --- Platform detection ---
+# ============================================================================
+# Platform detection
+# ============================================================================
 if [ -d /data/data/com.termux/files/usr ] && [ -n "${PREFIX:-}" ]; then
     PLATFORM="termux"
 else
     PLATFORM="linux"
 fi
 
-INSTALL_PREFIX=""
-
-if [ "$PLATFORM" = "termux" ]; then
-    BIN_DIR="${PREFIX}/bin"
-    CFG_DIR="${PREFIX}/etc/conch"
-    SVC_DIR="${PREFIX}/var/service/conch"
-    BOOT_DIR="${HOME}/.termux/boot"
-else
-    BIN_DIR="/usr/local/bin"
-    CFG_DIR="/etc/conch"
+# ============================================================================
+# Output helpers
+# ============================================================================
+BOLD=""; CYAN=""; GREEN=""; YELLOW=""; RED=""; RESET=""
+if [ -t 1 ] || [ -n "${TERM:-}" ]; then
+    BOLD=$(tput bold 2>/dev/null || printf '\033[1m')
+    CYAN=$(tput setaf 6 2>/dev/null || printf '\033[36m')
+    GREEN=$(tput setaf 2 2>/dev/null || printf '\033[32m')
+    YELLOW=$(tput setaf 3 2>/dev/null || printf '\033[33m')
+    RED=$(tput setaf 1 2>/dev/null || printf '\033[31m')
+    RESET=$(tput sgr0 2>/dev/null || printf '\033[0m')
 fi
 
-# --- Colors ---
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-log()  { echo -e "${GREEN}[+]${NC} $*"; }
-warn() { echo -e "${YELLOW}[!]${NC} $*"; }
-die()  { echo -e "${RED}[x]${NC} $*" >&2; exit 1; }
-
-# --- Usage ---
-usage() {
-    cat <<EOF
-Usage: $0 [OPTIONS]
-
-Install Conch as a system service.
-
-Options:
-  --api-key KEY        Pre-shared API key (default: auto-generate)
-  --port PORT          Listen port (default: ${DEFAULT_PORT})
-  --host ADDR          Listen address (default: ${DEFAULT_HOST})
-  --timeout SEC        Default command timeout seconds (default: ${DEFAULT_TIMEOUT})
-  --max-timeout SEC    Max command timeout seconds (default: ${DEFAULT_MAX_TIMEOUT})
-  --no-auth            Disable authentication (insecure, dev only)
-  --prefix DIR         Install root directory (default: platform-specific)
-  --bin PATH           Use pre-built binary, skip Go build
-  --mcp-bin PATH       Use pre-built MCP binary, skip Go build for MCP
-  --no-start           Install but don't start the service
-  --uninstall          Remove service and binary
-  -y, --yes            Skip all prompts, use defaults
-  -h, --help           Show this help
-
-Examples:
-  # Full auto (random key, default port, build from source):
-  sudo $0
-
-  # Custom install location:
-  sudo $0 --prefix /opt/conch
-
-  # Custom port and key:
-  sudo $0 --port 9000 --api-key "\$(head -c 32 /dev/urandom | base64)"
-
-  # Termux (no root needed):
-  $0 --port 8080
-
-  # Uninstall:
-  sudo $0 --uninstall
-EOF
-    exit 0
+banner() {
+    echo ""
+    echo "  ${CYAN}╔══════════════════════════════════════════════╗${RESET}"
+    echo "  ${CYAN}║          Conch Shell Server                  ║${RESET}"
+    echo "  ${CYAN}║          ${PLATFORM^} Installer                      ║${RESET}"
+    echo "  ${CYAN}╚══════════════════════════════════════════════╝${RESET}"
+    echo ""
 }
 
-# --- Parse args ---
+step()  { echo "  ${CYAN}[$1/$2]${RESET} $3"; }
+ok()    { echo "    ${GREEN}✓${RESET} $*"; }
+warn()  { echo "    ${YELLOW}⚠${RESET} $*" >&2; }
+err()   { echo "    ${RED}✗${RESET} $*" >&2; }
+info()  { echo "    ${CYAN}→${RESET} $*"; }
+die()   { echo ""; err "$@"; rollback; echo ""; echo "  For help: https://github.com/newo-ether/conch"; echo ""; exit 1; }
+
+# Prompt helper — respects YES_ALL
+prompt() {
+    local msg="$1" default="${2:-y}"
+    local yn
+    if $YES_ALL; then
+        [ "$default" = "y" ] && return 0 || return 1
+    fi
+    if [ "$default" = "y" ]; then yn="[Y/n]"; else yn="[y/N]"; fi
+    printf "    ? %s %s " "$msg" "$yn" >&2
+    read -r reply </dev/tty 2>/dev/null || { reply="$default"; echo "$reply" >&2; }
+    reply="${reply:-$default}"
+    case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
+}
+
+# ============================================================================
+# Rollback state
+# ============================================================================
+ROLLBACK_CMDS=()
+push_rollback() { ROLLBACK_CMDS=("$1" "${ROLLBACK_CMDS[@]}"); }
+rollback() {
+    [ ${#ROLLBACK_CMDS[@]} -eq 0 ] && return
+    echo ""
+    echo "  ${YELLOW}Cleaning up partial installation...${RESET}"
+    for cmd in "${ROLLBACK_CMDS[@]}"; do
+        echo "    ${YELLOW}→${RESET} $cmd"
+        eval "$cmd" 2>/dev/null || true
+    done
+}
+
+# ============================================================================
+# Retry helper
+# ============================================================================
+retry() {
+    local max="${1:-3}" delay="${2:-2}" desc="${3:-operation}"
+    shift 3 || true
+    local attempt=0
+    while [ $attempt -lt "$max" ]; do
+        attempt=$((attempt + 1))
+        if "$@" 2>/dev/null; then return 0; fi
+        if [ $attempt -lt "$max" ]; then
+            warn "Retry $attempt/$max for $desc... (waiting ${delay}s)"
+            sleep "$delay"
+            delay=$(( (delay * 2 < 15) ? delay * 2 : 15 ))
+        fi
+    done
+    return 1
+}
+
+# ============================================================================
+# Atomic file write
+# ============================================================================
+atomic_write() {
+    local content="$1" target="$2"
+    local tmp="${target}.tmp.$$"
+    echo "$content" > "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$target"
+}
+
+# ============================================================================
+# Detect architecture for prebuilt binary download
+# ============================================================================
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)   echo "amd64" ;;
+        aarch64|arm64)  echo "arm64" ;;
+        *)              echo "unknown" ;;
+    esac
+}
+
+# ============================================================================
+# Download from GitHub Releases
+# ============================================================================
+GITHUB_RELEASES="https://github.com/newo-ether/conch/releases/latest/download"
+download_binary() {
+    local name="$1" dest="$2"
+    local url="${GITHUB_RELEASES}/${name}"
+    info "Downloading ${name}..."
+    if command -v curl &>/dev/null; then
+        retry 3 3 "download $name" \
+            curl -fsSL --connect-timeout 10 --max-time 120 -o "$dest" "$url" || return 1
+    elif command -v wget &>/dev/null; then
+        retry 3 3 "download $name" \
+            wget -q --timeout=120 -O "$dest" "$url" || return 1
+    else
+        return 1
+    fi
+    chmod 755 "$dest"
+    ok "Downloaded: $name"
+}
+
+# ============================================================================
+# Check binary looks valid (>= 1MB)
+# ============================================================================
+valid_binary() {
+    [ -f "$1" ] && [ "$(stat -c%s "$1" 2>/dev/null || echo 0)" -gt 1048576 ]
+}
+
+# ============================================================================
+# Parse arguments
+# ============================================================================
 API_KEY=""
 PORT="${DEFAULT_PORT}"
 HOST="${DEFAULT_HOST}"
@@ -85,6 +166,7 @@ SRC_MCP=""
 NO_START=false
 DO_UNINSTALL=false
 YES_ALL=false
+INSTALL_PREFIX=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -100,13 +182,44 @@ while [ $# -gt 0 ]; do
         --no-start)      NO_START=true; shift ;;
         --uninstall)     DO_UNINSTALL=true; shift ;;
         -y|--yes)        YES_ALL=true; shift ;;
-        -h|--help)       usage ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "  --api-key KEY      Pre-shared API key"
+            echo "  --port PORT        Listen port (default: ${DEFAULT_PORT})"
+            echo "  --host ADDR        Listen address (default: ${DEFAULT_HOST})"
+            echo "  --timeout SEC      Command timeout seconds (default: ${DEFAULT_TIMEOUT})"
+            echo "  --max-timeout SEC  Max timeout seconds (default: ${DEFAULT_MAX_TIMEOUT})"
+            echo "  --no-auth          Disable authentication (dev only)"
+            echo "  --prefix DIR       Install root directory"
+            echo "  --bin PATH         Use pre-built binary"
+            echo "  --mcp-bin PATH     Use pre-built MCP binary"
+            echo "  --no-start         Install but don't start"
+            echo "  --uninstall        Remove service and binary"
+            echo "  -y, --yes          Skip prompts, use defaults"
+            exit 0
+            ;;
         *) die "Unknown flag: $1 (use --help)" ;;
     esac
 done
 
-# --- Apply custom prefix ---
-if [ -n "${INSTALL_PREFIX}" ]; then
+# ============================================================================
+# Constants
+# ============================================================================
+SERVICE_NAME="conch"
+ARCH=$(detect_arch)
+
+# Platform-specific paths
+if [ -z "${INSTALL_PREFIX}" ]; then
+    if [ "$PLATFORM" = "termux" ]; then
+        BIN_DIR="${PREFIX}/bin"
+        CFG_DIR="${PREFIX}/etc/conch"
+        SVC_DIR="${PREFIX}/var/service/conch"
+        BOOT_DIR="${HOME}/.termux/boot"
+    else
+        BIN_DIR="/usr/local/bin"
+        CFG_DIR="/etc/conch"
+    fi
+else
     BIN_DIR="${INSTALL_PREFIX}"
     CFG_DIR="${INSTALL_PREFIX}"
     if [ "$PLATFORM" = "termux" ]; then
@@ -118,76 +231,8 @@ BIN_PATH="${BIN_DIR}/conch"
 MCP_BIN_PATH="${BIN_DIR}/conch-mcp"
 ENV_FILE="${CFG_DIR}/env"
 
-# --- Uninstall ---
-if $DO_UNINSTALL; then
-    log "Uninstalling Conch..."
-
-    if [ "$PLATFORM" = "linux" ] && [ "$(id -u)" -ne 0 ]; then
-        die "uninstall requires root: sudo $0 --uninstall"
-    fi
-
-    if [ "$PLATFORM" = "linux" ] && [ -f /etc/systemd/system/conch.service ]; then
-        systemctl stop conch 2>/dev/null || true
-        systemctl disable conch 2>/dev/null || true
-        rm -f /etc/systemd/system/conch.service
-        systemctl daemon-reload
-        log "Removed systemd service"
-    fi
-
-    if [ "$PLATFORM" = "termux" ]; then
-        sv stop conch 2>/dev/null || true
-        rm -rf "${SVC_DIR}" 2>/dev/null || true
-        rm -f "${BOOT_DIR}/01-conch" 2>/dev/null || true
-        log "Removed runit service"
-    fi
-
-    rm -f "${BIN_PATH}"
-    log "Removed binary: ${BIN_PATH}"
-    rm -f "${MCP_BIN_PATH}"
-    rm -rf "${CFG_DIR}"
-    log "Removed config: ${CFG_DIR}"
-    log "Uninstall complete."
-    exit 0
-fi
-
-# --- Root check (Linux only) ---
-if [ "$PLATFORM" = "linux" ] && [ "$(id -u)" -ne 0 ]; then
-    die "Root privileges required. Run with: sudo $0"
-fi
-
-# --- Locate or build binary ---
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-GITHUB_RELEASES="https://github.com/newo-ether/conch/releases/latest/download"
-
-# Detect platform arch for prebuilt binary download
-detect_arch() {
-    case "$(uname -m)" in
-        x86_64|amd64)   echo "amd64" ;;
-        aarch64|arm64)  echo "arm64" ;;
-        *)              echo "unknown" ;;
-    esac
-}
-
-# Download from GitHub Releases
-download_binary() {
-    local name="$1" dest="$2"
-    local url="${GITHUB_RELEASES}/${name}"
-    log "Downloading ${name}..."
-    if command -v curl &>/dev/null; then
-        curl -fsSL --connect-timeout 10 --max-time 120 -o "${dest}" "${url}" || return 1
-    elif command -v wget &>/dev/null; then
-        wget -q --timeout=120 -O "${dest}" "${url}" || return 1
-    else
-        return 1
-    fi
-    chmod 755 "${dest}"
-}
-
-ARCH=$(detect_arch)
-if [ "$PLATFORM" = "windows" ]; then
-    SERVER_BIN_NAME="conch-windows-amd64.exe"
-    MCP_BIN_NAME="conch-mcp-windows-amd64.exe"
-elif [ "$PLATFORM" = "termux" ] || [ "$ARCH" = "arm64" ]; then
+# Download names
+if [ "$PLATFORM" = "termux" ] || [ "$ARCH" = "arm64" ]; then
     SERVER_BIN_NAME="conch-linux-arm64"
     MCP_BIN_NAME="conch-mcp-linux-arm64"
 else
@@ -195,87 +240,303 @@ else
     MCP_BIN_NAME="conch-mcp-linux-amd64"
 fi
 
+# Repo/working directory (handles piped execution where $0 is not a script path)
+if [ -f "$0" ] && [ "$(basename "$0")" != "bash" ]; then
+    REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+else
+    REPO_DIR="$(mktemp -d /tmp/conch-install.XXXXXX)"
+    push_rollback "rm -rf $REPO_DIR"
+fi
+
+# ============================================================================
+# Banner & step init
+# ============================================================================
+banner
+STEP=1
+TOTAL_STEPS=6
+$DO_UNINSTALL && TOTAL_STEPS=2
+
+# ============================================================================
+# Step 1 — Environment checks
+# ============================================================================
+step $STEP $TOTAL_STEPS "Checking environment..."
+
+# --- OS / arch ---
+ok "OS: $(uname -s) $(uname -r)"
+ok "Arch: ${ARCH} (platform: ${PLATFORM})"
+
+# --- Root check (Linux only) ---
+if [ "$PLATFORM" = "linux" ] && [ "$(id -u)" -ne 0 ]; then
+    if $DO_UNINSTALL; then
+        die "Uninstall requires root. Run: sudo $0 --uninstall"
+    fi
+    die "Root privileges required. Run: sudo $0"
+fi
+ok "$( [ "$PLATFORM" = "linux" ] && echo 'root' || echo 'termux user' )"
+
+# --- Connectivity check ---
+if ! $DO_UNINSTALL && [ -z "${SRC_BIN}" ]; then
+    if command -v curl &>/dev/null || command -v wget &>/dev/null; then
+        ok "Download tool: $(command -v curl || command -v wget)"
+    else
+        die "Neither curl nor wget found. Install one to continue."
+    fi
+fi
+
+# --- Port conflict check ---
+if ! $DO_UNINSTALL; then
+    if command -v ss &>/dev/null; then
+        if ss -tlnp 2>/dev/null | grep -q ":${PORT}\b"; then
+            proc_name=$(ss -tlnp 2>/dev/null | grep ":${PORT}\b" | sed -n 's/.*users:(("\([^"]*\).*/\1/p')
+            warn "Port $PORT is already in use by: ${proc_name:-unknown}"
+            prompt "Continue anyway?" "y" || die "Aborted. Choose a different port with --port <number>."
+        else
+            ok "Port $PORT available"
+        fi
+    elif command -v netstat &>/dev/null; then
+        if netstat -tlnp 2>/dev/null | grep -q ":${PORT}\b"; then
+            warn "Port $PORT is already in use"
+            prompt "Continue anyway?" "y" || die "Aborted. Choose a different port with --port <number>."
+        else
+            ok "Port $PORT available"
+        fi
+    fi
+fi
+
+# --- Dependency checks ---
+if [ "$PLATFORM" = "linux" ] && ! command -v systemctl &>/dev/null; then
+    die "systemd required but not found. This script supports systemd-based Linux distributions."
+fi
+if [ "$PLATFORM" = "termux" ] && ! command -v sv &>/dev/null; then
+    die "termux-services required. Run: pkg install termux-services"
+fi
+
+STEP=$((STEP + 1))
+
+# ============================================================================
+# Step 2 — Uninstall (if requested)
+# ============================================================================
+if $DO_UNINSTALL; then
+    step $STEP $TOTAL_STEPS "Uninstalling Conch..."
+
+    FOUND=false
+
+    if [ "$PLATFORM" = "linux" ] && [ -f /etc/systemd/system/conch.service ]; then
+        FOUND=true
+        info "Stopping and removing systemd service..."
+        systemctl stop conch 2>/dev/null || true
+        systemctl disable conch 2>/dev/null || true
+        rm -f /etc/systemd/system/conch.service
+        systemctl daemon-reload
+        ok "systemd service removed"
+    fi
+
+    if [ "$PLATFORM" = "termux" ]; then
+        if [ -d "${SVC_DIR}" ]; then
+            FOUND=true
+            sv stop conch 2>/dev/null || true
+            rm -rf "${SVC_DIR}"
+            ok "runit service removed"
+        fi
+        if [ -f "${BOOT_DIR}/01-conch" ]; then
+            rm -f "${BOOT_DIR}/01-conch"
+            ok "boot script removed"
+        fi
+    fi
+
+    if [ -f "${BIN_PATH}" ] || [ -f "${MCP_BIN_PATH}" ] || [ -d "${CFG_DIR}" ]; then
+        FOUND=true
+        rm -f "${BIN_PATH}" "${MCP_BIN_PATH}"
+        rm -rf "${CFG_DIR}"
+        ok "Files removed"
+    fi
+
+    if ! $FOUND; then
+        warn "No existing Conch installation found."
+        exit 0
+    fi
+
+    STEP=$((STEP + 1))
+    step $STEP $TOTAL_STEPS "Done."
+    echo ""
+    ok "Conch has been uninstalled."
+    echo ""
+    exit 0
+fi
+
+# ============================================================================
+# Step 2 — Detect & handle existing installation
+# ============================================================================
+EXISTING=false
+[ -f "${BIN_PATH}" ] && EXISTING=true
+[ -d "${CFG_DIR}" ] && EXISTING=true
+[ "$PLATFORM" = "linux" ] && [ -f /etc/systemd/system/conch.service ] && EXISTING=true
+[ "$PLATFORM" = "termux" ] && [ -d "${SVC_DIR}" ] && EXISTING=true
+
+if $EXISTING; then
+    step $STEP $TOTAL_STEPS "Existing installation detected"
+
+    [ -f "${BIN_PATH}" ] && warn "Binary: ${BIN_PATH}"
+    [ -d "${CFG_DIR}" ]  && warn "Config: ${CFG_DIR}"
+    [ "$PLATFORM" = "linux" ]  && [ -f /etc/systemd/system/conch.service ] && warn "Service: systemd unit"
+    [ "$PLATFORM" = "termux" ] && [ -d "${SVC_DIR}" ] && warn "Service: runit"
+
+    echo ""
+    if prompt "Remove existing installation before proceeding?" "y"; then
+        info "Removing existing installation..."
+        if [ "$PLATFORM" = "linux" ] && [ -f /etc/systemd/system/conch.service ]; then
+            systemctl stop conch 2>/dev/null || true
+            systemctl disable conch 2>/dev/null || true
+            rm -f /etc/systemd/system/conch.service
+            systemctl daemon-reload
+            ok "systemd service removed"
+        fi
+        if [ "$PLATFORM" = "termux" ] && [ -d "${SVC_DIR}" ]; then
+            sv stop conch 2>/dev/null || true
+            rm -rf "${SVC_DIR}"
+            ok "runit service removed"
+        fi
+        rm -f "${BIN_PATH}" "${MCP_BIN_PATH}"
+        rm -rf "${CFG_DIR}"
+        ok "Files removed"
+    else
+        info "Keeping existing files. Proceeding with in-place update."
+    fi
+fi
+
+STEP=$((STEP + 1))
+
+# ============================================================================
+# Step 3 — Acquire binary
+# ============================================================================
+step $STEP $TOTAL_STEPS "Acquiring conch binary..."
+
+SRC=""
 if [ -n "${SRC_BIN}" ]; then
     if [ ! -f "${SRC_BIN}" ]; then
-        die "binary not found: ${SRC_BIN}"
+        die "Binary not found: ${SRC_BIN}"
     fi
-    log "Using provided binary: ${SRC_BIN}"
+    ok "Using provided binary: ${SRC_BIN}"
+    SRC="${SRC_BIN}"
 elif download_binary "${SERVER_BIN_NAME}" "${REPO_DIR}/conch"; then
-    SRC_BIN="${REPO_DIR}/conch"
-elif command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
-    log "Download failed. Building from source..."
-    cd "${REPO_DIR}"
-    go build -o conch .
-    SRC_BIN="${REPO_DIR}/conch"
-elif [ -f "${REPO_DIR}/conch" ]; then
-    SRC_BIN="${REPO_DIR}/conch"
-elif command -v conch &>/dev/null; then
-    SRC_BIN="$(command -v conch)"
-else
-    die "Failed to download or build binary. Use --bin to specify a pre-built binary path."
+    SRC="${REPO_DIR}/conch"
+    if ! valid_binary "$SRC"; then
+        warn "Downloaded file appears invalid. Trying alternatives..."
+        rm -f "$SRC"
+        SRC=""
+    fi
 fi
 
-# --- Install binary ---
-mkdir -p "${BIN_DIR}"
-cp "${SRC_BIN}" "${BIN_PATH}"
-chmod 755 "${BIN_PATH}"
-log "Installed: ${BIN_PATH}"
+if [ -z "$SRC" ]; then
+    warn "GitHub download failed or produced invalid file, trying alternatives..."
 
-# --- Locate or build MCP binary ---
+    if command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
+        info "Building from source..."
+        (cd "${REPO_DIR}" && go build -o conch .) || warn "Build failed"
+        [ -f "${REPO_DIR}/conch" ] && SRC="${REPO_DIR}/conch" && ok "Built from source"
+    fi
+
+    [ -z "$SRC" ] && [ -f "${REPO_DIR}/conch" ] && SRC="${REPO_DIR}/conch" && ok "Using local conch"
+
+    if [ -z "$SRC" ] && command -v conch &>/dev/null; then
+        SRC="$(command -v conch)"
+        ok "Using conch from PATH: ${SRC}"
+    fi
+
+    if [ -z "$SRC" ]; then
+        die "Could not acquire binary. Download from: https://github.com/newo-ether/conch/releases/latest"
+    fi
+fi
+
+if ! valid_binary "$SRC"; then
+    warn "Binary at $SRC is smaller than expected ($(stat -c%s "$SRC") bytes)"
+    warn "  Installation may succeed but the server might not work."
+fi
+
+STEP=$((STEP + 1))
+
+# ============================================================================
+# Step 4 — Install files
+# ============================================================================
+step $STEP $TOTAL_STEPS "Installing files..."
+
+mkdir -p "${BIN_DIR}"
+
+copy_if_different() {
+    local src="$1" dst="$2" label="$3"
+    if [ -f "$dst" ] && [ "$(realpath "$src" 2>/dev/null || readlink -f "$src")" = "$(realpath "$dst" 2>/dev/null || readlink -f "$dst")" ]; then
+        ok "$label already in place (same file)"
+        return
+    fi
+    cp -f "$src" "$dst"
+    chmod 755 "$dst"
+    ok "$label installed"
+}
+
+copy_if_different "$SRC" "${BIN_PATH}" "conch"
+
+# MCP binary
+SRC_MCP_FINAL=""
 if [ -n "${SRC_MCP}" ]; then
     if [ ! -f "${SRC_MCP}" ]; then
-        warn "MCP binary not found: ${SRC_MCP}. Skipping conch-mcp."
-        SRC_MCP=""
+        warn "MCP binary not found: ${SRC_MCP} — skipping conch-mcp"
     else
-        log "Using provided MCP binary: ${SRC_MCP}"
+        SRC_MCP_FINAL="${SRC_MCP}"
+        ok "Using provided MCP binary"
     fi
 elif download_binary "${MCP_BIN_NAME}" "${REPO_DIR}/conch-mcp"; then
-    SRC_MCP="${REPO_DIR}/conch-mcp"
-elif command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
-    log "Building conch-mcp from source..."
-    cd "${REPO_DIR}"
-    if go build -o conch-mcp ./cmd/mcp; then
-        SRC_MCP="${REPO_DIR}/conch-mcp"
-    else
-        warn "Failed to build conch-mcp. Skipping MCP bridge install."
-    fi
-elif [ -f "${REPO_DIR}/conch-mcp" ]; then
-    SRC_MCP="${REPO_DIR}/conch-mcp"
-    log "Using prebuilt conch-mcp"
-elif command -v conch-mcp &>/dev/null; then
-    SRC_MCP="$(command -v conch-mcp)"
-    log "Using conch-mcp from PATH: ${SRC_MCP}"
+    SRC_MCP_FINAL="${REPO_DIR}/conch-mcp"
 else
-    warn "No conch-mcp binary found. Skipping MCP bridge install."
+    if command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
+        info "Building conch-mcp from source..."
+        if (cd "${REPO_DIR}" && go build -o conch-mcp ./cmd/mcp); then
+            SRC_MCP_FINAL="${REPO_DIR}/conch-mcp"
+            ok "MCP built from source"
+        else
+            warn "Failed to build conch-mcp"
+        fi
+    elif [ -f "${REPO_DIR}/conch-mcp" ]; then
+        SRC_MCP_FINAL="${REPO_DIR}/conch-mcp"
+    elif command -v conch-mcp &>/dev/null; then
+        SRC_MCP_FINAL="$(command -v conch-mcp)"
+        ok "Using conch-mcp from PATH"
+    fi
 fi
 
-if [ -n "${SRC_MCP}" ]; then
-    cp "${SRC_MCP}" "${MCP_BIN_PATH}"
-    chmod 755 "${MCP_BIN_PATH}"
-    log "Installed: ${MCP_BIN_PATH}"
+if [ -n "$SRC_MCP_FINAL" ]; then
+    copy_if_different "$SRC_MCP_FINAL" "${MCP_BIN_PATH}" "conch-mcp"
+else
+    warn "conch-mcp not available — MCP bridge will not be installed"
 fi
 
-# --- API Key ---
+STEP=$((STEP + 1))
+
+# ============================================================================
+# Step 5 — Configuration
+# ============================================================================
+step $STEP $TOTAL_STEPS "Configuring..."
+
 mkdir -p "${CFG_DIR}"
 
 if [ -z "${API_KEY}" ]; then
     if [ -f "${ENV_FILE}" ]; then
-        # Read existing key from env file
-        # shellcheck disable=SC1090
         API_KEY=$(grep -E '^CONCH_API_KEY=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true)
-        if [ -z "${API_KEY}" ]; then
-            API_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '=+' | head -c 43)
-            warn "Existing config has no API key, generated new one."
-        else
-            log "Using existing API key from ${ENV_FILE}"
+        if [ -n "${API_KEY}" ]; then
+            ok "Reusing API key from existing env"
         fi
-    else
-        API_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '=+' | head -c 43)
+    fi
+    if [ -z "${API_KEY}" ]; then
+        API_KEY=$(head -c 32 /dev/urandom 2>/dev/null | base64 | tr -d '=+' | head -c 43)
+        ok "Generated new API key"
     fi
 fi
 
-# --- Write config ---
-cat > "${ENV_FILE}" <<EOF
+MASKED_KEY="${API_KEY}"
+if [ ${#API_KEY} -gt 8 ]; then
+    MASKED_KEY="${API_KEY:0:4}...${API_KEY: -4}"
+fi
+
+cat > "${ENV_FILE}.tmp.$$" <<EOF
 CONCH_API_KEY=${API_KEY}
 CONCH_PORT=${PORT}
 CONCH_HOST=${HOST}
@@ -283,38 +544,29 @@ CONCH_TIMEOUT=${TIMEOUT}
 CONCH_MAX_TIMEOUT=${MAX_TIMEOUT}
 CONCH_ALLOW_NO_AUTH=${ALLOW_NO_AUTH}
 EOF
-chmod 600 "${ENV_FILE}"
-log "Config: ${ENV_FILE}"
-log "API key: ${API_KEY}"
+chmod 600 "${ENV_FILE}.tmp.$$"
+mv -f "${ENV_FILE}.tmp.$$" "${ENV_FILE}"
+
+ok "Config written: ${ENV_FILE}"
+info "API key: ${MASKED_KEY}"
 
 if $ALLOW_NO_AUTH; then
-    warn "Authentication disabled (CONCH_ALLOW_NO_AUTH=true). Do not expose to untrusted networks."
+    warn "Authentication is DISABLED — do not expose to untrusted networks!"
 fi
 
-# --- Service setup ---
+STEP=$((STEP + 1))
 
-# Helper: prompt yn with default
-# Usage: ask "question" [default]  -> sets $REPLY to "y" or "n"
-ask() {
-    local prompt="$1"
-    local default="${2:-y}"
-    local yn
-    if [ "$default" = "y" ]; then
-        yn="Y/n"
-    else
-        yn="y/N"
-    fi
-    printf "%s [%s] " "$prompt" "$yn" >&2
-    read -r REPLY </dev/tty 2>/dev/null || REPLY="$default"
-    REPLY="${REPLY:-$default}"
-}
+# ============================================================================
+# Step 6 — Register & start service
+# ============================================================================
+step $STEP $TOTAL_STEPS "Registering service..."
 
 if [ "$PLATFORM" = "linux" ]; then
     UNIT_FILE="/etc/systemd/system/conch.service"
 
-    # Stop and remove any existing service before overwriting
+    # Clean up stale unit
     if [ -f "${UNIT_FILE}" ]; then
-        log "Existing service found, stopping..."
+        info "Removing stale systemd unit..."
         systemctl stop conch 2>/dev/null || true
         systemctl disable conch 2>/dev/null || true
         rm -f "${UNIT_FILE}"
@@ -339,8 +591,9 @@ StandardError=journal
 WantedBy=multi-user.target
 UNIT
 
+    push_rollback "systemctl stop conch 2>/dev/null; rm -f ${UNIT_FILE}; systemctl daemon-reload"
     systemctl daemon-reload
-    log "Service unit created"
+    ok "systemd unit created"
 
     ENABLE_BOOT=true
     DO_START=true
@@ -348,64 +601,72 @@ UNIT
         ENABLE_BOOT=false
         DO_START=false
     elif ! $YES_ALL; then
-        ask "Enable auto-start on boot?" "y"
-        [ "$REPLY" = "n" ] || [ "$REPLY" = "N" ] && ENABLE_BOOT=false
-        ask "Start service now?" "y"
-        [ "$REPLY" = "n" ] || [ "$REPLY" = "N" ] && DO_START=false
+        echo ""
+        prompt "Enable auto-start on boot?" "y" || ENABLE_BOOT=false
+        prompt "Start service now?" "y" || DO_START=false
     fi
 
     if $ENABLE_BOOT; then
-        systemctl enable conch
-        log "Auto-start on boot: enabled"
+        systemctl enable conch 2>/dev/null || warn "Failed to enable auto-start"
+        ok "Auto-start on boot: enabled"
     else
-        log "Auto-start on boot: skipped"
+        ok "Auto-start on boot: skipped"
     fi
 
     if $DO_START; then
-        systemctl start conch
-        log "Service started"
+        systemctl start conch 2>/dev/null || warn "Failed to start service"
+        sleep 2
+        if systemctl is-active --quiet conch 2>/dev/null; then
+            ok "Service started"
+            # Quick health check
+            if command -v curl &>/dev/null; then
+                if curl -s --max-time 5 "http://localhost:${PORT}/health" >/dev/null 2>&1; then
+                    ok "Health check passed: localhost:${PORT}/health"
+                else
+                    warn "Health check failed — service may still be initializing"
+                fi
+            fi
+        else
+            warn "Service may not have started. Check: systemctl status conch"
+        fi
     else
-        log "Service installed (not started). Start with: systemctl start conch"
+        info "Service installed but not started. Start with: systemctl start conch"
     fi
-
-    echo ""
-    log "Manage: systemctl {start,stop,restart,status} conch"
-    log "Logs:   journalctl -u conch -f"
 
 elif [ "$PLATFORM" = "termux" ]; then
-    if ! command -v sv &>/dev/null; then
-        die "termux-services not installed. Run: pkg install termux-services"
-    fi
-
-    # Stop existing service if running
+    # Stop existing if running
     sv stop conch 2>/dev/null || true
 
     mkdir -p "${SVC_DIR}"
 
-    cat > "${SVC_DIR}/run" <<RUN
+    cat > "${SVC_DIR}/run" <<'RUN'
 #!/data/data/com.termux/files/usr/bin/sh
 exec 2>&1
 set -a
-. ${ENV_FILE}
+. CFG_FILE_PLACEHOLDER
 set +a
-exec ${BIN_PATH}
+exec BIN_PATH_PLACEHOLDER
 RUN
+    sed -i "s|CFG_FILE_PLACEHOLDER|${ENV_FILE}|" "${SVC_DIR}/run"
+    sed -i "s|BIN_PATH_PLACEHOLDER|${BIN_PATH}|" "${SVC_DIR}/run"
     chmod 755 "${SVC_DIR}/run"
 
-    # runit env directory (one file per var)
+    push_rollback "sv stop conch 2>/dev/null; rm -rf ${SVC_DIR}"
+
+    # runit env directory
     mkdir -p "${SVC_DIR}/env"
     while IFS='=' read -r key value; do
         case "$key" in '#'*|'') continue ;; esac
         echo "$value" > "${SVC_DIR}/env/${key}"
     done < "${ENV_FILE}"
 
-    log "Runit service created"
+    ok "runit service created"
 
-    # --- Boot auto-start ---
+    # Boot auto-start
     SETUP_BOOT=false
     if ! $NO_START && ! $YES_ALL; then
-        ask "Enable auto-start on boot? (requires termux-boot)" "y"
-        [ "$REPLY" != "n" ] && [ "$REPLY" != "N" ] && SETUP_BOOT=true
+        echo ""
+        prompt "Enable auto-start on boot? (requires termux-boot)" "y" && SETUP_BOOT=true
     elif ! $NO_START; then
         SETUP_BOOT=true
     fi
@@ -417,31 +678,51 @@ RUN
 sv up conch 2>/dev/null || true
 BOOT
             chmod 755 "${BOOT_DIR}/01-conch"
-            log "Boot script installed"
+            ok "Boot script installed"
         else
             warn "termux-boot directory not found. Auto-start on boot NOT set up."
-            warn "  pkg install termux-boot"
-            warn "  mkdir -p ~/.termux/boot"
-            warn "  Re-run this installer afterward."
+            warn "  pkg install termux-boot && mkdir -p ~/.termux/boot"
+            warn "  Then re-run this installer."
         fi
     fi
 
-    # --- Start now ---
+    # Start now
     DO_START=true
-    if $NO_START; then
-        DO_START=false
-    elif ! $YES_ALL; then
-        ask "Start service now?" "y"
-        [ "$REPLY" = "n" ] || [ "$REPLY" = "N" ] && DO_START=false
+    $NO_START && DO_START=false
+    if ! $NO_START && ! $YES_ALL; then
+        prompt "Start service now?" "y" || DO_START=false
     fi
 
     if $DO_START; then
         sv up conch
-        log "Service started"
+        sleep 2
+        ok "Service started"
     else
-        log "Service installed (not started). Start with: sv up conch"
+        info "Service installed but not started. Start with: sv up conch"
     fi
 fi
 
+# ============================================================================
+# Done
+# ============================================================================
 echo ""
-log "Test: curl -s http://localhost:${PORT}/health"
+echo "  ${GREEN}╔══════════════════════════════════════════════╗${RESET}"
+echo "  ${GREEN}║  ${BOLD}Installation Complete${RESET}                          ${GREEN}║${RESET}"
+echo "  ${GREEN}╚══════════════════════════════════════════════╝${RESET}"
+echo ""
+echo "  ${CYAN}Health check:${RESET}   curl -s http://localhost:${PORT}/health"
+echo "  ${CYAN}API key:${RESET}       ${MASKED_KEY}"
+echo "  ${CYAN}Config file:${RESET}   ${ENV_FILE}"
+echo ""
+if [ "$PLATFORM" = "linux" ]; then
+    echo "  ${CYAN}Manage:${RESET}"
+    echo "    systemctl {start,stop,restart,status} conch"
+    echo "    journalctl -u conch -f"
+elif [ "$PLATFORM" = "termux" ]; then
+    echo "  ${CYAN}Manage:${RESET}"
+    echo "    sv {up,down,status} conch"
+    echo "    Uninstall: $0 --uninstall"
+fi
+echo ""
+
+) # end subshell — protects the user's shell from exit
