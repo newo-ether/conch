@@ -218,7 +218,10 @@ if [ -z "${INSTALL_PREFIX}" ]; then
         BIN_DIR="${PREFIX}/bin"
         CFG_DIR="${PREFIX}/etc/conch"
         SVC_DIR="${PREFIX}/var/service/conch"
-        BOOT_DIR="${HOME}/.termux/boot"
+        # $HOME may be wrong under sudo; derive from PREFIX
+    termux_home="${HOME}"
+    if [ -n "${PREFIX:-}" ]; then termux_home="$(dirname "$PREFIX")/home"; fi
+    BOOT_DIR="${termux_home}/.termux/boot"
     else
         BIN_DIR="/usr/local/bin"
         CFG_DIR="/etc/conch"
