@@ -228,12 +228,81 @@ Write-OK "Administrator"
 $osVer = [Environment]::OSVersion.Version
 Write-OK "OS: Windows $($osVer.Major).$($osVer.Minor) (build $($osVer.Build))"
 
-# --- nssm check ---
-$nssm = Get-Command nssm -ErrorAction SilentlyContinue
+# --- nssm: locate or install (must succeed early, before any downloads) ---
+function Find-Nssm {
+    # 1. Already in PATH?
+    $cmd = Get-Command nssm -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd }
+
+    # 2. Known install locations
+    $paths = @(
+        "$env:ProgramFiles\nssm\win64\nssm.exe",
+        "$env:ProgramFiles\nssm\nssm.exe",
+        "${env:ProgramFiles(x86)}\nssm\nssm.exe",
+        "$env:ChocolateyInstall\bin\nssm.exe",
+        "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\NSSM.NSSM_*\win64\nssm.exe"
+    )
+    foreach ($p in $paths) {
+        $resolved = Get-Item $p -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($resolved) { return Get-Command $resolved.FullName }
+    }
+
+    return $null
+}
+
+function Install-Nssm {
+    # A. winget (fastest, most reliable)
+    Write-Info "Trying winget install NSSM.NSSM..."
+    try {
+        winget install NSSM.NSSM --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+        Start-Sleep -Seconds 3
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("Path", "User")
+        $found = Find-Nssm
+        if ($found) { return $found }
+    } catch { }
+
+    # B. Direct download from nssm.cc
+    Write-Info "winget unavailable, downloading nssm directly..."
+    $nssmZip = "$env:TEMP\nssm.zip"
+    $nssmDir = "$env:ProgramFiles\nssm"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        (New-Object System.Net.WebClient).DownloadFile(
+            "https://nssm.cc/release/nssm-2.24.zip", $nssmZip)
+        Expand-Archive -Force $nssmZip -DestinationPath $nssmDir -ErrorAction Stop
+        Remove-Item $nssmZip -Force -ErrorAction SilentlyContinue
+        # nssm zip extracts to nssm-<ver>/win64/nssm.exe
+        $exe = Get-Item "$nssmDir\nssm-*\win64\nssm.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($exe) {
+            $env:Path = "$(Split-Path $exe.FullName);$env:Path"
+            [System.Environment]::SetEnvironmentVariable("Path",
+                "$(Split-Path $exe.FullName);$([System.Environment]::GetEnvironmentVariable('Path', 'Machine'))",
+                "Machine")
+            return (Get-Command $exe.FullName)
+        }
+    } catch {
+        Write-Warn "Direct download also failed: $($_.Exception.Message)"
+        if (Test-Path $nssmZip) { Remove-Item $nssmZip -Force -ErrorAction SilentlyContinue }
+    }
+
+    return $null
+}
+
+$nssm = Find-Nssm
 if ($nssm) {
     Write-OK "nssm: $($nssm.Source)"
 } elseif (-not $Uninstall) {
-    Write-Info "nssm not found — will install automatically"
+    $nssm = Install-Nssm
+    if ($nssm) {
+        Write-OK "nssm installed: $($nssm.Source)"
+    } else {
+        Write-Err "nssm (Non-Sucking Service Manager) is required."
+        Write-Host "    Install it manually, then re-run this script:"
+        Write-Host "      winget install NSSM.NSSM"
+        Write-Host "    Or download from: https://nssm.cc/download"
+        throw "nssm not found and could not be installed automatically."
+    }
 }
 
 # --- Internet connectivity check (non-blocking, just a warning) ---
@@ -684,47 +753,14 @@ $Step++
 # ============================================================================
 Write-Step $Step $TotalSteps "Registering service..."
 
-# Ensure nssm is available
+# nssm was already acquired in Step 1; verify it still resolves
 if (-not $nssm) {
-    Write-Info "Installing nssm via winget..."
-
-    # Try multiple known nssm paths
-    $nssmPaths = @(
-        "$env:ProgramFiles\nssm\nssm.exe",
-        "${env:ProgramFiles(x86)}\nssm\nssm.exe",
-        "$env:ChocolateyInstall\bin\nssm.exe",
-        "$env:SystemRoot\nssm.exe"
-    )
-    foreach ($p in $nssmPaths) {
-        if (Test-Path $p) {
-            $nssm = Get-Command $p -ErrorAction SilentlyContinue
-            if ($nssm) { break }
-        }
-    }
-
+    $nssm = Get-Command nssm -ErrorAction SilentlyContinue
     if (-not $nssm) {
-        try {
-            winget install NSSM.NSSM --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
-            Start-Sleep -Seconds 3
-            # Refresh PATH
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-                        [System.Environment]::GetEnvironmentVariable("Path", "User")
-            $nssm = Get-Command nssm -ErrorAction SilentlyContinue
-            if (-not $nssm) {
-                # Try the default winget install location
-                $defPath = "$env:ProgramFiles\nssm\nssm.exe"
-                if (Test-Path $defPath) { $nssm = Get-Command $defPath }
-            }
-        } catch {
-            Write-Warn "winget install failed: $($_.Exception.Message)"
-        }
+        throw "nssm lost after install. Please re-run the script."
     }
-
-    if (-not $nssm) {
-        Write-ErrorExit "nssm is required but could not be installed automatically.`n  Install manually: winget install NSSM.NSSM`n  Or download from: https://nssm.cc/download"
-    }
-    Write-OK "nssm ready: $($nssm.Source)"
 }
+Write-OK "nssm ready: $($nssm.Source)"
 
 # Clean up any leftover service registration
 $existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
