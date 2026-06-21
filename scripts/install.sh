@@ -39,7 +39,7 @@ if [ -t 1 ] || [ -n "${TERM:-}" ]; then
 fi
 
 banner() {
-    local title="${PLATFORM^} Installer"
+    local title="${PLATFORM^} (${ARCH}) Installer"
     # Box internal width = 46 (48 total with ║ borders)
     local pad1=$((46 - 10 - 18))   # "Conch Shell Server" = 18 chars
     local pad2=$((46 - 10 - ${#title}))
