@@ -135,7 +135,7 @@ if ($Uninstall) {
     if ($svc) {
         Stop-ServiceWait -Name $ServiceName
         sc.exe delete $ServiceName 2>&1 | Out-Null
-        nssm remove $ServiceName confirm 2>&1 | Out-Null
+        cmd /c "nssm remove $ServiceName confirm >nul 2>&1"
         Write-Success "Removed service: $ServiceName"
     } else {
         Write-Warn "Service not found: $ServiceName"
@@ -160,7 +160,7 @@ if ($svc) {
     Write-Warn "Removing existing service..."
     Stop-ServiceWait -Name $ServiceName
     sc.exe delete $ServiceName 2>&1 | Out-Null
-    if ($nssm) { & $nssm.Source remove $ServiceName confirm 2>&1 | Out-Null }
+    if ($nssm) { cmd /c "nssm remove $ServiceName confirm >nul 2>&1" }
 }
 Get-Process -Name "conch" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
@@ -302,7 +302,7 @@ $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($svc) {
     Stop-ServiceWait -Name $ServiceName
     sc.exe delete $ServiceName 2>&1 | Out-Null
-    nssm remove $ServiceName confirm 2>&1 | Out-Null
+    cmd /c "nssm remove $ServiceName confirm >nul 2>&1"
 }
 
 # Install with nssm
