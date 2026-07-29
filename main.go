@@ -38,6 +38,17 @@ func main() {
 	apiKeyBytes := []byte(cfg.APIKey)
 
 	executor := shell.NewExecutor(cfg.Timeout, cfg.MaxTimeout)
+	jobManager, err := shell.NewJobManager(
+		executor,
+		cfg.JobDir,
+		cfg.JobRetention,
+		cfg.MaxJobRuntime,
+		cfg.MaxJobOutputBytes,
+		cfg.MaxJobs,
+	)
+	if err != nil {
+		log.Fatalf("failed to initialize shell job manager: %v", err)
+	}
 	executeHandler := &handler.ExecuteHandler{
 		Executor: executor,
 		APIKey:   apiKeyBytes,
@@ -53,6 +64,18 @@ func main() {
 	fileGrepHandler := &handler.FileGrepHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
 
 	mux.Handle("POST /execute", auth(executeHandler))
+	mux.Handle("POST /jobs/start", auth(&handler.JobHandler{
+		Action: "start", Jobs: jobManager, APIKey: apiKeyBytes, KeyPair: keyPair,
+	}))
+	mux.Handle("POST /jobs/list", auth(&handler.JobHandler{
+		Action: "list", Jobs: jobManager, APIKey: apiKeyBytes, KeyPair: keyPair,
+	}))
+	mux.Handle("POST /jobs/get", auth(&handler.JobHandler{
+		Action: "get", Jobs: jobManager, APIKey: apiKeyBytes, KeyPair: keyPair,
+	}))
+	mux.Handle("POST /jobs/stop", auth(&handler.JobHandler{
+		Action: "stop", Jobs: jobManager, APIKey: apiKeyBytes, KeyPair: keyPair,
+	}))
 	mux.Handle("POST /file/read", auth(fileReadHandler))
 	mux.Handle("POST /file/write", auth(fileWriteHandler))
 	mux.Handle("POST /file/glob", auth(fileGlobHandler))

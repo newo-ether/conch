@@ -10,6 +10,7 @@ A lightweight, zero-dependency shell execution server with SSE streaming and end
 - **HMAC request signing** — proves API key possession without transmitting it
 - **Anti-replay protection** — time-bucketed nonce tracking with ±5 min clock skew tolerance
 - **SSE streaming** — stdout and stderr delivered line-by-line
+- **Durable background jobs** — start, inspect, list, and stop commands independently of the client connection
 - **Rate limiting** — per-IP token bucket (20 req/s sustained, burst 40)
 - **Single binary** — zero dependencies, statically linked, ~8 MiB
 - **Cross-platform** — Linux (arm64/amd64), Windows (amd64), Termux on Android
@@ -99,6 +100,11 @@ curl -s http://localhost:14216/health
 | `CONCH_ALLOW_NO_AUTH` | `false` | Start without an API key. Encryption and signing are disabled; all requests are accepted in plaintext. |
 | `CONCH_TIMEOUT` | `30` | Default command timeout in seconds |
 | `CONCH_MAX_TIMEOUT` | `120` | Maximum allowed timeout in seconds |
+| `CONCH_JOB_DIR` | OS user config directory | Directory containing durable background-job snapshots |
+| `CONCH_JOB_RETENTION_HOURS` | `168` | Retain completed background jobs for this many hours |
+| `CONCH_MAX_JOB_TIMEOUT_SECONDS` | `86400` | Maximum runtime of one background job |
+| `CONCH_MAX_JOB_OUTPUT_BYTES` | `262144` | Maximum rolling output retained per job |
+| `CONCH_MAX_JOBS` | `100` | Maximum retained job snapshots; running jobs are never evicted |
 
 ## Platform behavior
 
@@ -174,6 +180,19 @@ data: <base64url ciphertext>
 ```
 
 **Error responses:** `401` for all auth failures (signature mismatch, clock skew, replayed nonce, missing headers). `400` for decryption errors. `405` for wrong method.
+
+### Background job endpoints
+
+Background jobs use the same authenticated and encrypted POST envelope as `/execute`. They continue after the initiating HTTP request disconnects, share the global command concurrency limit, and persist bounded output and terminal state under `CONCH_JOB_DIR`.
+
+| Endpoint | Request body | Description |
+|----------|--------------|-------------|
+| `POST /jobs/start` | `{"command":"...","timeout_ms":600000,"workdir":"/tmp"}` | Start a durable job and return its `job_id` |
+| `POST /jobs/list` | `{}` | List retained jobs, newest first |
+| `POST /jobs/get` | `{"job_id":"..."}` | Return current state, rolling output, exit code, and truncation metadata |
+| `POST /jobs/stop` | `{"job_id":"..."}` | Cancel the job and its process tree |
+
+Job states are `running`, `stopping`, `succeeded`, `failed`, `stopped`, and `interrupted`. A job that was active when Conch restarted is recovered as `interrupted`; Conch never reports an orphaned process as still running.
 
 ### Protocol summary
 

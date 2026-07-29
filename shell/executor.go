@@ -43,6 +43,16 @@ func NewExecutor(defaultTimeout, maxTimeout time.Duration) *Executor {
 }
 
 func (e *Executor) Execute(ctx context.Context, req Request) <-chan LineEvent {
+	return e.ExecuteWithMaxTimeout(ctx, req, e.MaxTimeout)
+}
+
+// ExecuteWithMaxTimeout shares the executor's global concurrency semaphore while allowing
+// the background-job manager to use its separately configured (and still bounded) deadline.
+func (e *Executor) ExecuteWithMaxTimeout(
+	ctx context.Context,
+	req Request,
+	maxTimeout time.Duration,
+) <-chan LineEvent {
 	ch := make(chan LineEvent, 10)
 
 	go func() {
@@ -66,8 +76,11 @@ func (e *Executor) Execute(ctx context.Context, req Request) <-chan LineEvent {
 		if req.TimeoutMs > 0 {
 			timeout = time.Duration(req.TimeoutMs) * time.Millisecond
 		}
-		if timeout > e.MaxTimeout {
-			timeout = e.MaxTimeout
+		if maxTimeout <= 0 {
+			maxTimeout = e.MaxTimeout
+		}
+		if timeout > maxTimeout {
+			timeout = maxTimeout
 		}
 
 		execCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -117,6 +130,7 @@ func (e *Executor) Execute(ctx context.Context, req Request) <-chan LineEvent {
 		go func() {
 			defer wg.Done()
 			scanner := bufio.NewScanner(stdout)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 			for scanner.Scan() {
 				ch <- LineEvent{Line: scanner.Text(), Stream: "stdout"}
 			}
@@ -125,6 +139,7 @@ func (e *Executor) Execute(ctx context.Context, req Request) <-chan LineEvent {
 		go func() {
 			defer wg.Done()
 			scanner := bufio.NewScanner(stderr)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 			for scanner.Scan() {
 				ch <- LineEvent{Line: scanner.Text(), Stream: "stderr"}
 			}

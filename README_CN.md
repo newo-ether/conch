@@ -10,6 +10,7 @@
 - **HMAC 请求签名** — 证明 API 密钥持有权，无需传输密钥本身
 - **防重放保护** — 基于时间桶的 nonce 追踪，支持 ±5 分钟时钟偏差
 - **SSE 流式输出** — stdout 和 stderr 逐行实时推送
+- **持久化后台任务** — 后台启动、查看、列出和停止命令，不依赖客户端连接持续存在
 - **速率限制** — 每个 IP 令牌桶限流（20 req/s 持续，突发 40）
 - **单二进制文件** — 零依赖，静态链接，约 8 MiB
 - **跨平台** — Linux（arm64/amd64）、Windows（amd64）、Termux（Android）
@@ -96,6 +97,11 @@ curl -s http://localhost:14216/health
 | `CONCH_ALLOW_NO_AUTH` | `false` | 允许无密钥启动。加密和签名被禁用，所有请求以明文接受。 |
 | `CONCH_TIMEOUT` | `30` | 默认命令超时时间（秒） |
 | `CONCH_MAX_TIMEOUT` | `120` | 允许的最大超时时间（秒） |
+| `CONCH_JOB_DIR` | 操作系统用户配置目录 | 持久化后台任务快照目录 |
+| `CONCH_JOB_RETENTION_HOURS` | `168` | 已结束后台任务的保留时长（小时） |
+| `CONCH_MAX_JOB_TIMEOUT_SECONDS` | `86400` | 单个后台任务的最长运行时间（秒） |
+| `CONCH_MAX_JOB_OUTPUT_BYTES` | `262144` | 每个任务保留的滚动输出上限 |
+| `CONCH_MAX_JOBS` | `100` | 最多保留的任务快照数；运行中的任务永不清理 |
 
 ## 平台差异
 
@@ -171,6 +177,19 @@ data: <base64url 密文>
 ```
 
 **错误响应：** 所有认证失败（签名不匹配、时钟偏差、重放 nonce、缺少请求头）返回 `401`。解密错误返回 `400`。方法错误返回 `405`。
+
+### 后台任务接口
+
+后台任务使用与 `/execute` 相同的认证和加密 POST 封装。发起请求的 HTTP 连接断开后任务仍会继续运行；所有任务共享全局命令并发上限，并在 `CONCH_JOB_DIR` 中持久化有界滚动输出和最终状态。
+
+| 接口 | 请求体 | 说明 |
+|------|--------|------|
+| `POST /jobs/start` | `{"command":"...","timeout_ms":600000,"workdir":"/tmp"}` | 启动持久化任务并返回 `job_id` |
+| `POST /jobs/list` | `{}` | 按从新到旧顺序列出保留的任务 |
+| `POST /jobs/get` | `{"job_id":"..."}` | 返回当前状态、滚动输出、退出码和截断信息 |
+| `POST /jobs/stop` | `{"job_id":"..."}` | 取消任务及其整个进程树 |
+
+任务状态包括 `running`、`stopping`、`succeeded`、`failed`、`stopped` 和 `interrupted`。如果 Conch 重启时任务仍处于活动状态，恢复后会明确标记为 `interrupted`，不会把已失去管理关系的进程错误显示为仍在运行。
 
 ### 协议概览
 
