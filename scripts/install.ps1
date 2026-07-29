@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Downloads (or builds) the conch binary, generates an API key, and registers
-    a Windows service via nssm. Interactive by default — use -Yes for scripting.
+    a Windows service via nssm. Interactive by default - use -Yes for scripting.
 
 .PARAMETER ApiKey
     Pre-shared API key. If omitted, a random 32-byte key is generated.
@@ -101,7 +101,7 @@ function Invoke-Rollback {
     Write-Host ""
     Write-Host "  Cleaning up partial installation..." -ForegroundColor Yellow
     foreach ($entry in $Script:RollbackStack) {
-        Write-Host "    ${Yellow}→${Reset} $($entry.Desc)" -ForegroundColor Yellow
+        Write-Host "    ${Yellow}>${Reset} $($entry.Desc)" -ForegroundColor Yellow
         try { & $entry.Action } catch { }
     }
 }
@@ -141,10 +141,10 @@ function Write-Banner {
     $t1 = "Conch Shell Server"
     $t2 = "Windows Installer"
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host ("  ║          {0}{1}║" -f $t1, (' ' * ($boxW - 10 - $t1.Length))) -ForegroundColor Cyan
-    Write-Host ("  ║          {0}{1}║" -f $t2, (' ' * ($boxW - 10 - $t2.Length))) -ForegroundColor Cyan
-    Write-Host "  ╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  +----------------------------------------------+" -ForegroundColor Cyan
+    Write-Host ("  |          {0}{1}|" -f $t1, (' ' * ($boxW - 10 - $t1.Length))) -ForegroundColor Cyan
+    Write-Host ("  |          {0}{1}|" -f $t2, (' ' * ($boxW - 10 - $t2.Length))) -ForegroundColor Cyan
+    Write-Host "  +----------------------------------------------+" -ForegroundColor Cyan
     Write-Host ""
 }
 
@@ -154,10 +154,10 @@ function Write-Step {
     Write-Host $Text
 }
 
-function Write-OK   { Write-Host "    ${Cyan}✓${Reset} $args" }
-function Write-Warn { Write-Host "    ${Yellow}⚠${Reset} $args" }
-function Write-Err  { Write-Host "    ${Red}✗${Reset} $args" }
-function Write-Info { Write-Host "    ${Cyan}→${Reset} $args" }
+function Write-OK   { Write-Host "    ${Green}+${Reset} $args" }
+function Write-Warn { Write-Host "    ${Yellow}!${Reset} $args" }
+function Write-Err  { Write-Host "    ${Red}x${Reset} $args" }
+function Write-Info { Write-Host "    ${Cyan}>${Reset} $args" }
 
 function Write-ErrorExit {
     param([string]$Message, [switch]$NoRollback)
@@ -203,7 +203,7 @@ function Prompt-User {
 Write-Banner
 
 # ============================================================================
-# Step 1 — Environment checks
+# Step 1 - Environment checks
 # ============================================================================
 $Step = 1
 $TotalSteps = if ($Uninstall) { 2 } else { 6 }
@@ -313,7 +313,7 @@ if (-not $Uninstall -and -not $BinaryPath) {
     try {
         $connTest = [Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()
         if (-not $connTest) {
-            Write-Warn "No network connection detected — download may fail"
+            Write-Warn "No network connection detected - download may fail"
         } else {
             Write-OK "Network available"
         }
@@ -402,11 +402,77 @@ function Stop-ServiceWait {
         if ($svc.Status -eq "Stopped") { return $true }
         $TimeoutSec--
     }
-    Write-Warn "Service '$Name' did not stop within timeout — forcing..."
+    Write-Warn "Service '$Name' did not stop within timeout - forcing..."
     Get-Process -Name $Name -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     return $false
+}
+
+# Start through the Windows Service Controller, then treat the observed service
+# state as authoritative. NSSM may report START_PENDING on stderr even though the
+# service is starting normally, which PowerShell 5 turns into a terminating error
+# when ErrorActionPreference is Stop.
+function Start-ServiceWait {
+    param([string]$Name, [int]$TimeoutSec = 15)
+
+    $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    if (-not $svc) {
+        throw "Service '$Name' is not registered."
+    }
+    if ($svc.Status -eq "Running") {
+        return $true
+    }
+
+    if ($svc.Status -eq "Stopped") {
+        try {
+            Start-Service -Name $Name -ErrorAction Stop
+        } catch {
+            $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+            if (-not $svc -or $svc.Status -notin @("Running", "StartPending")) {
+                throw
+            }
+        }
+    }
+
+    while ($TimeoutSec -gt 0) {
+        $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if (-not $svc) {
+            return $false
+        }
+        if ($svc.Status -eq "Running") {
+            return $true
+        }
+        if ($svc.Status -eq "Stopped") {
+            return $false
+        }
+        Start-Sleep -Seconds 1
+        $TimeoutSec--
+    }
+    return $false
+}
+
+# Native stderr must not become a terminating PowerShell error before the exit
+# code is inspected. Keep all NSSM calls behind this boundary.
+function Invoke-Nssm {
+    param(
+        [string]$Path,
+        [string[]]$Arguments,
+        [switch]$AllowFailure
+    )
+
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Path @Arguments 2>&1 | Out-Null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+
+    if (-not $AllowFailure -and $exitCode -ne 0) {
+        throw "nssm $($Arguments[0]) failed (exit code $exitCode)"
+    }
 }
 
 # ============================================================================
@@ -447,7 +513,7 @@ function Test-ValidBinary {
 }
 
 # ============================================================================
-# Step 2 — Uninstall (if requested)
+# Step 2 - Uninstall (if requested)
 # ============================================================================
 if ($Uninstall) {
     Write-Step $Step $TotalSteps "Uninstalling Conch..."
@@ -494,7 +560,7 @@ if ($Uninstall) {
 }
 
 # ============================================================================
-# Step 2 — Detect & handle existing installation
+# Step 2 - Detect & handle existing installation
 # ============================================================================
 
 $existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -537,7 +603,7 @@ if ($existingSvc -or $existingDir) {
 $Step++
 
 # ============================================================================
-# Step 3 — Acquire binary
+# Step 3 - Acquire binary
 # ============================================================================
 Write-Step $Step $TotalSteps "Acquiring binaries..."
 
@@ -572,7 +638,7 @@ if ($BinaryPath) {
     }
     $SrcBin = Resolve-Path $BinaryPath
     if (-not (Test-ValidBinary $SrcBin)) {
-        Write-Warn "Binary at $SrcBin seems small — it may not be a valid executable"
+        Write-Warn "Binary at $SrcBin seems small - it may not be a valid executable"
         if (-not $Yes -and -not (Prompt-User "Use this binary anyway?" -Default "N")) {
             Write-ErrorExit "Aborted. Provide a valid binary with -BinaryPath."
         }
@@ -632,7 +698,7 @@ if (-not (Test-ValidBinary $SrcBin)) {
 $SrcMcp = $null
 if ($McpBinaryPath) {
     if (-not (Test-Path $McpBinaryPath)) {
-        Write-Warn "MCP binary not found: $McpBinaryPath — skipping conch-mcp"
+        Write-Warn "MCP binary not found: $McpBinaryPath - skipping conch-mcp"
     } else {
         $SrcMcp = Resolve-Path $McpBinaryPath
         Write-OK "Using provided MCP binary: $SrcMcp"
@@ -659,13 +725,13 @@ if ($McpBinaryPath) {
     }
 }
 if (-not $SrcMcp) {
-    Write-Warn "conch-mcp not available — MCP bridge will not be installed"
+    Write-Warn "conch-mcp not available - MCP bridge will not be installed"
 }
 
 $Step++
 
 # ============================================================================
-# Step 4 — Install files
+# Step 4 - Install files
 # ============================================================================
 Write-Step $Step $TotalSteps "Installing files..."
 
@@ -707,7 +773,7 @@ if ($SrcMcp) {
 $Step++
 
 # ============================================================================
-# Step 5 — Configuration
+# Step 5 - Configuration
 # ============================================================================
 Write-Step $Step $TotalSteps "Configuring..."
 
@@ -742,13 +808,13 @@ Write-OK "Config written: $EnvFile"
 Write-Info "API key: $ApiKey"
 
 if ($NoAuth) {
-    Write-Warn "Authentication is DISABLED — do not expose to untrusted networks!"
+    Write-Warn "Authentication is DISABLED - do not expose to untrusted networks!"
 }
 
 $Step++
 
 # ============================================================================
-# Step 6 — Register & start service
+# Step 6 - Register & start service
 # ============================================================================
 Write-Step $Step $TotalSteps "Registering service..."
 
@@ -760,6 +826,7 @@ if (-not $nssm) {
     }
 }
 Write-OK "nssm ready: $($nssm.Source)"
+$nssmExe = $nssm.Source
 
 # Clean up any leftover service registration
 $existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -767,7 +834,7 @@ if ($existingSvc) {
     Write-Info "Removing stale service registration..."
     Stop-ServiceWait -Name $ServiceName
     cmd /c "sc.exe delete `"$ServiceName`" >nul 2>&1"
-    cmd /c "nssm remove `"$ServiceName`" confirm >nul 2>&1"
+    Invoke-Nssm -Path $nssmExe -Arguments @("remove", $ServiceName, "confirm") -AllowFailure
     Start-Sleep -Seconds 2
     # Verify removal
     $stillThere = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -784,23 +851,24 @@ if ($existingSvc) {
 
 # Register with nssm
 Write-Info "Creating service..."
-$nssmExe = $nssm.Source
 
-& $nssmExe install $ServiceName "$BinPath" 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-ErrorExit "nssm install failed (exit code $LASTEXITCODE)" }
-Push-Rollback { cmd /c "nssm remove `"$ServiceName`" confirm >nul 2>&1" } "Remove created service: $ServiceName"
+Invoke-Nssm -Path $nssmExe -Arguments @("install", $ServiceName, $BinPath)
+Push-Rollback {
+    Invoke-Nssm -Path $nssmExe -Arguments @("remove", $ServiceName, "confirm") -AllowFailure
+} "Remove created service: $ServiceName"
 
-& $nssmExe set $ServiceName AppDirectory "$InstallDir" 2>&1 | Out-Null
-& $nssmExe set $ServiceName Start SERVICE_AUTO_START 2>&1 | Out-Null
-& $nssmExe set $ServiceName ObjectName "NT AUTHORITY\SYSTEM" 2>&1 | Out-Null
-& $nssmExe set $ServiceName DisplayName "Conch Shell Server" 2>&1 | Out-Null
+Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "AppDirectory", $InstallDir)
+Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "Start", "SERVICE_AUTO_START")
+Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "ObjectName", "NT AUTHORITY\SYSTEM")
+Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "DisplayName", "Conch Shell Server")
 
 # Set failure recovery: restart on failure (3 times)
-cmd /c "nssm set `"$ServiceName`" AppExit Default Restart >nul 2>&1"
+Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "AppExit", "Default", "Restart")
 
 # Environment variables
 $envLines = @(Get-Content $EnvFile)
-& $nssmExe set $ServiceName AppEnvironmentExtra $envLines 2>&1 | Out-Null
+$environmentArguments = @("set", $ServiceName, "AppEnvironmentExtra") + $envLines
+Invoke-Nssm -Path $nssmExe -Arguments $environmentArguments
 
 Write-OK "Service registered: $ServiceName (auto-start, auto-restart on failure)"
 
@@ -813,22 +881,7 @@ if (-not $NoStart -and -not $Yes) {
 
 if ($DoStart) {
     Write-Info "Starting service..."
-    & $nssmExe start $ServiceName 2>&1 | Out-Null
-
-    # Wait and verify with retry
-    $started = $false
-    for ($i = 0; $i -lt 5; $i++) {
-        Start-Sleep -Seconds 2
-        $svcCheck = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($svcCheck -and $svcCheck.Status -eq "Running") {
-            $started = $true
-            break
-        }
-        if ($i -lt 4) {
-            Write-Info "Waiting for service to start... (attempt $($i + 2)/5)"
-            & $nssmExe start $ServiceName 2>&1 | Out-Null
-        }
-    }
+    $started = Start-ServiceWait -Name $ServiceName -TimeoutSec 15
 
     if ($started) {
         Write-OK "Service started"
@@ -840,16 +893,14 @@ if ($DoStart) {
                 Write-OK "Health check passed: localhost:$Port/health"
             }
         } catch {
-            Write-Warn "Health check failed — service may still be initializing"
+            Write-Warn "Health check failed - service may still be initializing"
         }
     } else {
-        Write-Warn "Service may not have started within timeout"
-        Write-Warn "  Check logs: Get-EventLog -LogName Application -Source `"$ServiceName`" -Newest 10"
-        Write-Warn "  Or: nssm status $ServiceName"
+        Write-ErrorExit "Service '$ServiceName' did not reach Running state within 15 seconds."
     }
 } else {
     Write-Info "Service installed but not started. Start manually:"
-    Write-Info "  nssm start $ServiceName"
+    Write-Info "  Start-Service -Name $ServiceName"
 }
 
 # ============================================================================
@@ -857,9 +908,9 @@ if ($DoStart) {
 # ============================================================================
 Write-Host ""
 $boxW = 46; $t = "Installation Complete"
-Write-Host "  ╔══════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host ("  ║  ${Bold}{0}${Reset}{1}║" -f $t, (' ' * ($boxW - 2 - $t.Length))) -ForegroundColor Green
-Write-Host "  ╚══════════════════════════════════════════════╝" -ForegroundColor Green
+Write-Host "  +----------------------------------------------+" -ForegroundColor Green
+Write-Host ("  |  ${Bold}{0}${Reset}{1}|" -f $t, (' ' * ($boxW - 2 - $t.Length))) -ForegroundColor Green
+Write-Host "  +----------------------------------------------+" -ForegroundColor Green
 Write-Host ""
 Write-Host "  ${Cyan}Health check:${Reset}   curl.exe -s http://localhost:$Port/health"
 Write-Host "  ${Cyan}API key:${Reset}       $ApiKey"
