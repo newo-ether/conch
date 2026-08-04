@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/newo-ether/conch/mcp"
 )
@@ -16,6 +17,7 @@ func main() {
 	log.SetPrefix("[conch-mcp] ")
 
 	transports := make(map[string]*mcp.Transport)
+	unavailable := make(map[string]string)
 	var devices map[string]mcp.DeviceConfig
 
 	if devicesJSON := os.Getenv("CONCH_DEVICES"); devicesJSON != "" {
@@ -28,15 +30,25 @@ func main() {
 
 		for name, cfg := range devices {
 			if cfg.URL == "" || cfg.Key == "" {
-				log.Fatalf("device '%s': url and key are required", name)
+				unavailable[name] = "url and key are required"
+				log.Printf("[%s] unavailable: %s", name, unavailable[name])
+				continue
 			}
 			t := mcp.NewTransport(cfg.URL, cfg.Key)
 			log.Printf("[%s] connecting to %s ...", name, cfg.URL)
-			if err := t.Initialize(context.Background()); err != nil {
-				log.Fatalf("[%s] failed to initialize: %v", name, err)
+			connectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := t.Initialize(connectCtx)
+			cancel()
+			if err != nil {
+				unavailable[name] = err.Error()
+				log.Printf("[%s] unavailable: %v", name, err)
+				continue
 			}
 			log.Printf("[%s] connected, server public key verified", name)
 			transports[name] = t
+		}
+		if len(transports) == 0 {
+			log.Fatalf("no configured Conch device is available (%d failed)", len(unavailable))
 		}
 	} else {
 		serverURL := os.Getenv("CONCH_SERVER_URL")
@@ -57,7 +69,7 @@ func main() {
 		transports["default"] = t
 	}
 
-	server := mcp.NewServer(transports, devices)
+	server := mcp.NewServerWithUnavailable(transports, devices, unavailable)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

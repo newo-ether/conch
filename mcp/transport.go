@@ -167,6 +167,14 @@ type FileReadResult struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// FileImageResult is the decrypted binary-safe response from POST /file/image.
+type FileImageResult struct {
+	Data     string `json:"data"`
+	MimeType string `json:"mimeType"`
+	Size     int64  `json:"size"`
+	Error    string `json:"error,omitempty"`
+}
+
 // GrepMatchResult is one match from POST /file/grep.
 type GrepMatchResult struct {
 	Path    string `json:"path"`
@@ -193,6 +201,25 @@ func (t *Transport) FileRead(ctx context.Context, path string, offset, limit int
 	}
 	if result.Error != "" {
 		return nil, fmt.Errorf("%s", result.Error)
+	}
+	return &result, nil
+}
+
+// FileImage reads an image without passing binary bytes through a UTF-8 string.
+func (t *Transport) FileImage(ctx context.Context, path string) (*FileImageResult, error) {
+	body, err := json.Marshal(map[string]string{"path": path})
+	if err != nil {
+		return nil, err
+	}
+	var result FileImageResult
+	if err := t.doFileRequest(ctx, "/file/image", body, &result); err != nil {
+		return nil, err
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	if result.Data == "" || result.MimeType == "" {
+		return nil, fmt.Errorf("server returned incomplete image data")
 	}
 	return &result, nil
 }

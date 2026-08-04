@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -47,6 +48,18 @@ var allTools = []Tool{
 				"path":   {Type: "string", Description: "Absolute path to the file"},
 				"offset": {Type: "integer", Description: "Byte offset to start reading from (optional, default 0)"},
 				"limit":  {Type: "integer", Description: "Maximum bytes to read (optional, default 1MB)"},
+			},
+			Required: []string{"device", "path"},
+		},
+	},
+	{
+		Name:        "view_image",
+		Description: "Read and inspect an image from a remote device. Returns standard MCP image content so a vision-capable model can see the file.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device": {Type: "string", Description: "The target device name"},
+				"path":   {Type: "string", Description: "Absolute path to the image file"},
 			},
 			Required: []string{"device", "path"},
 		},
@@ -110,12 +123,27 @@ var allTools = []Tool{
 
 // Server is a stdio-based MCP server.
 type Server struct {
-	transports map[string]*Transport
-	devices    map[string]DeviceConfig
+	transports  map[string]*Transport
+	devices     map[string]DeviceConfig
+	unavailable map[string]string
 }
 
 func NewServer(transports map[string]*Transport, devices map[string]DeviceConfig) *Server {
-	return &Server{transports: transports, devices: devices}
+	return NewServerWithUnavailable(transports, devices, nil)
+}
+
+// NewServerWithUnavailable keeps failed configured devices visible without allowing one failed
+// initialization to remove healthy devices from the MCP server.
+func NewServerWithUnavailable(
+	transports map[string]*Transport,
+	devices map[string]DeviceConfig,
+	unavailable map[string]string,
+) *Server {
+	return &Server{
+		transports:  transports,
+		devices:     devices,
+		unavailable: unavailable,
+	}
 }
 
 // Run starts the stdio read-eval loop. Blocks until stdin closes.
@@ -227,6 +255,12 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 			return errorResult(errText), nil
 		}
 		return s.doFileRead(ctx, transport, p.Arguments)
+	case "view_image":
+		transport, errText := s.resolveDevice(p.Arguments)
+		if errText != "" {
+			return errorResult(errText), nil
+		}
+		return s.doViewImage(ctx, transport, p.Arguments)
 	case "file_write":
 		transport, errText := s.resolveDevice(p.Arguments)
 		if errText != "" {
@@ -269,6 +303,9 @@ func (s *Server) resolveDevice(args map[string]interface{}) (*Transport, string)
 	}
 	t, ok := s.transports[device]
 	if !ok {
+		if reason, configured := s.unavailable[device]; configured {
+			return nil, fmt.Sprintf("device '%s' is unavailable: %s", device, reason)
+		}
 		return nil, fmt.Sprintf("unknown device '%s'. Available: %v", device, deviceNames(s.transports))
 	}
 	return t, ""
@@ -281,19 +318,35 @@ func (s *Server) doListDevices() ToolCallResult {
 		Name        string `json:"name"`
 		Description string `json:"description"`
 		URL         string `json:"url"`
+		Available   bool   `json:"available"`
+		Error       string `json:"error,omitempty"`
 	}
 	var devices []DeviceInfo
-	for name, cfg := range s.devices {
+	names := make([]string, 0, len(s.devices))
+	for name := range s.devices {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		cfg := s.devices[name]
+		_, available := s.transports[name]
 		devices = append(devices, DeviceInfo{
 			Name:        name,
 			Description: cfg.Description,
 			URL:         cfg.URL,
+			Available:   available,
+			Error:       s.unavailable[name],
 		})
 	}
 	// Fallback: list transports if no device configs stored
 	if len(devices) == 0 {
+		names = names[:0]
 		for name := range s.transports {
-			devices = append(devices, DeviceInfo{Name: name})
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			devices = append(devices, DeviceInfo{Name: name, Available: true})
 		}
 	}
 	data, _ := json.Marshal(devices)
@@ -367,6 +420,25 @@ func (s *Server) doFileRead(ctx context.Context, t *Transport, args map[string]i
 		return errorResult(fmt.Sprintf("file_read error: %v", err)), nil
 	}
 	return textResult(result.Content), nil
+}
+
+// --- view_image ---
+
+func (s *Server) doViewImage(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
+	path, _ := args["path"].(string)
+	if path == "" {
+		return errorResult("path is required"), nil
+	}
+	result, err := t.FileImage(ctx, path)
+	if err != nil {
+		return errorResult(fmt.Sprintf("view_image error: %v", err)), nil
+	}
+	return ToolCallResult{
+		Content: []ContentItem{
+			{Type: "text", Text: fmt.Sprintf("Loaded image %s (%d bytes)", path, result.Size)},
+			{Type: "image", Data: result.Data, MimeType: result.MimeType},
+		},
+	}, nil
 }
 
 // --- file_write ---

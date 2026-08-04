@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,7 +18,8 @@ import (
 	"github.com/newo-ether/conch/crypto"
 )
 
-const maxFileSize = 1 << 20 // 1 MB
+const maxFileSize = 1 << 20       // 1 MB
+const maxImageFileSize = 20 << 20 // 20 MB
 
 // grepMaxFileSize bounds per-file reads during grep so a single huge file cannot
 // exhaust memory; mirrors the 500 KB cap used by the on-device sandbox backend.
@@ -37,6 +39,17 @@ type FileReadResponse struct {
 	Content    string `json:"content"`
 	Lines      int    `json:"lines"`
 	TotalLines int    `json:"totalLines"`
+}
+
+// FileImageRequest is the decrypted body for POST /file/image.
+type FileImageRequest struct {
+	Path string `json:"path"`
+}
+
+type FileImageResponse struct {
+	Data     string `json:"data"`
+	MimeType string `json:"mimeType"`
+	Size     int64  `json:"size"`
 }
 
 // FileWriteRequest is the decrypted body for POST /file/write.
@@ -209,6 +222,83 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		TotalLines: lines, // not scanning whole file for total
 	}
 	writeJSONResponse(w, resp, aesKey)
+}
+
+// FileImageHandler reads one bounded raster image without any text conversion.
+// The base64 payload stays inside the existing encrypted JSON envelope.
+type FileImageHandler struct {
+	APIKey  []byte
+	KeyPair *crypto.KeyPair
+}
+
+func (h *FileImageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+
+	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
+	if err != nil {
+		writeJSONResponse(w, map[string]string{"error": err.Error()}, aesKey)
+		return
+	}
+
+	var req FileImageRequest
+	if err := json.Unmarshal(plaintext, &req); err != nil {
+		writeJSONResponse(w, map[string]string{"error": "invalid json"}, aesKey)
+		return
+	}
+	if req.Path == "" {
+		writeJSONResponse(w, map[string]string{"error": "path is required"}, aesKey)
+		return
+	}
+
+	f, err := os.Open(req.Path)
+	if err != nil {
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("open: %v", err)}, aesKey)
+		return
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("stat: %v", err)}, aesKey)
+		return
+	}
+	if !info.Mode().IsRegular() {
+		writeJSONResponse(w, map[string]string{"error": "path is not a regular file"}, aesKey)
+		return
+	}
+	if info.Size() <= 0 {
+		writeJSONResponse(w, map[string]string{"error": "image is empty"}, aesKey)
+		return
+	}
+	if info.Size() > maxImageFileSize {
+		writeJSONResponse(w, map[string]string{"error": "image exceeds 20MB limit"}, aesKey)
+		return
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, maxImageFileSize+1))
+	if err != nil {
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("read: %v", err)}, aesKey)
+		return
+	}
+	if len(data) > maxImageFileSize {
+		writeJSONResponse(w, map[string]string{"error": "image exceeds 20MB limit"}, aesKey)
+		return
+	}
+	mimeType := http.DetectContentType(data[:min(len(data), 512)])
+	if !strings.HasPrefix(mimeType, "image/") {
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("unsupported image type: %s", mimeType)}, aesKey)
+		return
+	}
+
+	writeJSONResponse(w, FileImageResponse{
+		Data:     base64.StdEncoding.EncodeToString(data),
+		MimeType: mimeType,
+		Size:     info.Size(),
+	}, aesKey)
 }
 
 // FileWriteHandler serves POST /file/write.

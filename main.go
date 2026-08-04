@@ -59,6 +59,7 @@ func main() {
 	auth := handler.AuthMiddleware(apiKeyBytes, nonceTracker)
 
 	fileReadHandler := &handler.FileReadHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
+	fileImageHandler := &handler.FileImageHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
 	fileWriteHandler := &handler.FileWriteHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
 	fileGlobHandler := &handler.FileGlobHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
 	fileGrepHandler := &handler.FileGrepHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
@@ -77,6 +78,7 @@ func main() {
 		Action: "stop", Jobs: jobManager, APIKey: apiKeyBytes, KeyPair: keyPair,
 	}))
 	mux.Handle("POST /file/read", auth(fileReadHandler))
+	mux.Handle("POST /file/image", auth(fileImageHandler))
 	mux.Handle("POST /file/write", auth(fileWriteHandler))
 	mux.Handle("POST /file/glob", auth(fileGlobHandler))
 	mux.Handle("POST /file/grep", auth(fileGrepHandler))
