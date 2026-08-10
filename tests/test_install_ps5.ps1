@@ -130,4 +130,20 @@ try {
     Remove-Item -Force -LiteralPath $tempManifest -ErrorAction SilentlyContinue
 }
 
+$releaseBuilderPath = Join-Path $repoRoot "scripts\build-release.ps1"
+$releaseTokens = $null
+$releaseParseErrors = $null
+[Management.Automation.Language.Parser]::ParseFile(
+    $releaseBuilderPath,
+    [ref]$releaseTokens,
+    [ref]$releaseParseErrors
+) | Out-Null
+if ($releaseParseErrors.Count -gt 0) {
+    throw "build-release.ps1 parser errors: $($releaseParseErrors -join '; ')"
+}
+$releaseBuilderText = [IO.File]::ReadAllText($releaseBuilderPath)
+if (-not $releaseBuilderText.Contains('$checksumContent = [string]::Join("`n", $checksumLines) + "`n"')) {
+    throw "Release checksum manifest is not normalized to LF"
+}
+
 Write-Host "install.ps1 PowerShell 5 regression checks passed."

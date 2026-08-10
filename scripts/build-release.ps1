@@ -79,7 +79,12 @@ $checksumLines = foreach ($target in $targets) {
     "$hash  $($target.Name)"
 }
 $checksumPath = Join-Path $resolvedOutput "checksums.txt"
-[IO.File]::WriteAllLines($checksumPath, $checksumLines, [Text.UTF8Encoding]::new($false))
+$checksumContent = [string]::Join("`n", $checksumLines) + "`n"
+[IO.File]::WriteAllText(
+    $checksumPath,
+    $checksumContent,
+    [Text.UTF8Encoding]::new($false)
+)
 
 $windowsServer = Join-Path $resolvedOutput "conch-windows-amd64.exe"
 $windowsMcp = Join-Path $resolvedOutput "conch-mcp-windows-amd64.exe"
