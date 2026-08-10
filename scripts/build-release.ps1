@@ -73,7 +73,7 @@ try {
     $env:CGO_ENABLED = $oldCGO
 }
 
-$checksumLines = foreach ($target in $targets) {
+$checksumLines = foreach ($target in ($targets | Sort-Object Name)) {
     $path = Join-Path $resolvedOutput $target.Name
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
     "$hash  $($target.Name)"
