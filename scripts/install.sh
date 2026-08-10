@@ -41,25 +41,25 @@ fi
 
 banner() {
     local title="${PLATFORM^} (${ARCH}) Installer"
-    # Box internal width = 46 (48 total with 闁?borders)
+    # Box internal width = 46 (48 total with | borders)
     local pad1=$((46 - 10 - 18))   # "Conch Shell Server" = 18 chars
     local pad2=$((46 - 10 - ${#title}))
     echo ""
-    echo "  ${CYAN}闁崇儤鏌￠弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽${RESET}"
-    printf "  ${CYAN}闁?         %s%*s闁?{RESET}\n" "Conch Shell Server" "$pad1" ""
-    printf "  ${CYAN}闁?         %s%*s闁?{RESET}\n" "$title" "$pad2" ""
-    echo "  ${CYAN}闁崇儤鍩冮弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽畷${RESET}"
+    echo "  ${CYAN}+----------------------------------------------+${RESET}"
+    printf "  ${CYAN}|          %s%*s|${RESET}\n" "Conch Shell Server" "$pad1" ""
+    printf "  ${CYAN}|          %s%*s|${RESET}\n" "$title" "$pad2" ""
+    echo "  ${CYAN}+----------------------------------------------+${RESET}"
     echo ""
 }
 
 step()  { echo "  ${CYAN}[$1/$2]${RESET} $3"; }
-ok()    { echo "    ${GREEN}闁?{RESET} $*"; }
-warn()  { echo "    ${YELLOW}闁?{RESET} $*" >&2; }
-err()   { echo "    ${RED}闁?{RESET} $*" >&2; }
-info()  { echo "    ${CYAN}闁?{RESET} $*"; }
+ok()    { echo "    ${GREEN}[OK]${RESET} $*"; }
+warn()  { echo "    ${YELLOW}[WARN]${RESET} $*" >&2; }
+err()   { echo "    ${RED}[ERROR]${RESET} $*" >&2; }
+info()  { echo "    ${CYAN}[INFO]${RESET} $*"; }
 die()   { echo ""; err "$@"; rollback; echo ""; echo "  For help: https://github.com/newo-ether/conch"; echo ""; exit 1; }
 
-# Prompt helper 闁?respects YES_ALL
+# Prompt helper - respects YES_ALL
 prompt() {
     local msg="$1" default="${2:-y}"
     local yn
@@ -83,7 +83,7 @@ rollback() {
     echo ""
     echo "  ${YELLOW}Cleaning up partial installation...${RESET}"
     for cmd in "${ROLLBACK_CMDS[@]}"; do
-        echo "    ${YELLOW}闁?{RESET} $cmd"
+        echo "    ${YELLOW}[ROLLBACK]${RESET} $cmd"
         eval "$cmd" 2>/dev/null || true
     done
 }
@@ -168,19 +168,31 @@ file_sha256() {
 
 download_binary() {
     local name="$1" dest="$2"
-    local expected actual
+    local expected actual attempt
     info "Downloading $name from release $RELEASE_VERSION..."
     expected="$(expected_release_hash "$name")"
     [ -n "$expected" ] || { warn "No checksum found for $name"; return 1; }
-    download_url "$GITHUB_RELEASES/$name" "$dest" "download $name" || return 1
-    actual="$(file_sha256 "$dest")" || { warn "No SHA-256 tool available"; rm -f "$dest"; return 1; }
-    if [ "$actual" != "$expected" ]; then
-        warn "SHA-256 mismatch for $name"
-        rm -f "$dest"
-        return 1
-    fi
-    chmod 755 "$dest"
-    ok "Verified SHA-256: $name"
+
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+        if download_url "$GITHUB_RELEASES/$name" "$dest" "download $name"; then
+            actual="$(file_sha256 "$dest")" ||
+                { warn "No SHA-256 tool available"; rm -f "$dest"; return 1; }
+            if [ "$actual" = "$expected" ]; then
+                chmod 755 "$dest"
+                ok "Verified SHA-256: $name"
+                return 0
+            fi
+            warn "SHA-256 mismatch for $name (attempt $attempt/3)"
+            rm -f "$dest"
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            warn "Retrying verified download for $name..."
+            sleep "$attempt"
+        fi
+        attempt=$((attempt + 1))
+    done
+    return 1
 }
 
 # ============================================================================
@@ -340,9 +352,11 @@ else
 fi
 
 # Repo/working directory (handles piped execution where $0 is not a script path)
+REPO_IS_TEMP=false
 if [ -f "$0" ] && [ "$(basename "$0")" != "bash" ]; then
     REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 else
+    REPO_IS_TEMP=true
     REPO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/conch-install.XXXXXX")"
     push_rollback "rm -rf $REPO_DIR"
 fi
@@ -358,7 +372,7 @@ TOTAL_STEPS=6
 $DO_UNINSTALL && TOTAL_STEPS=2
 
 # ============================================================================
-# Step 1 闁?Environment checks
+# Step 1 - Environment checks
 # ============================================================================
 step $STEP $TOTAL_STEPS "Checking environment..."
 
@@ -415,7 +429,7 @@ fi
 STEP=$((STEP + 1))
 
 # ============================================================================
-# Step 2 闁?Uninstall (if requested)
+# Step 2 - Uninstall (if requested)
 # ============================================================================
 if $DO_UNINSTALL; then
     step $STEP $TOTAL_STEPS "Uninstalling Conch..."
@@ -466,10 +480,11 @@ if $DO_UNINSTALL; then
 fi
 
 # ============================================================================
-# Step 2 闁?Detect & handle existing installation
+# Step 2 - Detect & handle existing installation
 # ============================================================================
 EXISTING=false
 SERVICE_WAS_ACTIVE=false
+EXISTING_CONFIG_SHA256=""
 [ -f "$BIN_PATH" ] && EXISTING=true
 [ -d "$CFG_DIR" ] && EXISTING=true
 [ "$PLATFORM" = "linux" ] && [ -f /etc/systemd/system/conch.service ] && EXISTING=true
@@ -480,6 +495,23 @@ if $EXISTING; then
     [ -f "$BIN_PATH" ] && warn "Binary: $BIN_PATH"
     [ -d "$CFG_DIR" ] && warn "Config: $CFG_DIR"
     info "Performing an in-place upgrade; configuration and durable job state will be preserved."
+    if [ -f "$ENV_FILE" ]; then
+        EXISTING_CONFIG_SHA256="$(file_sha256 "$ENV_FILE")" ||
+            die "Cannot verify existing configuration before upgrade"
+        if $API_KEY_SET || $PORT_SET || $HOST_SET || $TIMEOUT_SET ||
+           $MAX_TIMEOUT_SET || $NO_AUTH_SET; then
+            die "Configuration override flags cannot be used during an in-place upgrade. Existing configuration will not be overwritten."
+        fi
+        existing_api_key="$(grep -E '^CONCH_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+        existing_no_auth="$(grep -E '^CONCH_ALLOW_NO_AUTH=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+        if [ -z "$existing_api_key" ] && [ "$existing_no_auth" != "true" ]; then
+            die "Existing configuration has no API key and authentication is enabled. Repair $ENV_FILE before upgrading."
+        fi
+        if [ -n "$existing_api_key" ] &&
+           [[ ! "$existing_api_key" =~ ^[A-Za-z0-9._~:/+=-]+$ ]]; then
+            die "Existing API key contains unsupported characters and cannot be printed safely. Repair $ENV_FILE before upgrading."
+        fi
+    fi
     if [ "$PLATFORM" = "linux" ]; then
         systemctl is-active --quiet conch 2>/dev/null && SERVICE_WAS_ACTIVE=true
     elif [ "$PLATFORM" = "termux" ] && [ -d "$SVC_DIR" ]; then
@@ -490,7 +522,7 @@ fi
 STEP=$((STEP + 1))
 
 # ============================================================================
-# Step 3 闁?Acquire binary
+# Step 3 - Acquire binary
 # ============================================================================
 step $STEP $TOTAL_STEPS "Acquiring binaries..."
 
@@ -511,7 +543,10 @@ elif download_binary "${SERVER_BIN_NAME}" "${REPO_DIR}/conch"; then
 fi
 
 if [ -z "$SRC" ]; then
-    warn "GitHub download failed or produced invalid file, trying alternatives..."
+    if $REPO_IS_TEMP; then
+        die "Could not download and verify $SERVER_BIN_NAME from release $RELEASE_VERSION. The existing installation was left unchanged."
+    fi
+    warn "Release download failed; trying source-checkout alternatives..."
 
     if command -v go &>/dev/null && [ -f "${REPO_DIR}/go.mod" ]; then
         info "Building from source..."
@@ -540,7 +575,7 @@ fi
 SRC_MCP_FINAL=""
 if [ -n "${SRC_MCP}" ]; then
     if [ ! -f "${SRC_MCP}" ]; then
-        warn "MCP binary not found: ${SRC_MCP} 闁?skipping conch-mcp"
+        warn "MCP binary not found: ${SRC_MCP} - skipping conch-mcp"
     else
         SRC_MCP_FINAL="${SRC_MCP}"
         ok "Using provided MCP binary: ${SRC_MCP}"
@@ -564,7 +599,7 @@ else
     fi
 fi
 if [ -z "$SRC_MCP_FINAL" ]; then
-    warn "conch-mcp not available 闁?MCP bridge will not be installed"
+    warn "conch-mcp not available - MCP bridge will not be installed"
 fi
 
 assert_binary_version() {
@@ -583,7 +618,7 @@ assert_binary_version "$SRC" "conch"
 STEP=$((STEP + 1))
 
 # ============================================================================
-# Step 4 闁?Install files
+# Step 4 - Install files
 # ============================================================================
 step $STEP $TOTAL_STEPS "Installing files..."
 
@@ -637,25 +672,23 @@ fi
 STEP=$((STEP + 1))
 
 # ============================================================================
-# Step 5 闁?Configuration
+# Step 5 - Configuration
 # ============================================================================
 step $STEP $TOTAL_STEPS "Configuring..."
 
 mkdir -p "${CFG_DIR}"
 
-ENV_BACKUP="${ENV_FILE}.previous"
 if [ -f "$ENV_FILE" ]; then
-    cp -p "$ENV_FILE" "$ENV_BACKUP"
-    push_rollback "cp -p '$ENV_BACKUP' '$ENV_FILE'"
+    CURRENT_CONFIG_SHA256="$(file_sha256 "$ENV_FILE")" ||
+        die "Cannot verify existing configuration after binary installation"
+    [ "$CURRENT_CONFIG_SHA256" = "$EXISTING_CONFIG_SHA256" ] ||
+        die "Existing configuration changed during upgrade; refusing to continue"
+    API_KEY="$(grep -E '^CONCH_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+    PORT="$(grep -E '^CONCH_PORT=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "$PORT")"
+    ALLOW_NO_AUTH="$(grep -E '^CONCH_ALLOW_NO_AUTH=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "$ALLOW_NO_AUTH")"
+    ok "Existing configuration preserved without changes: $ENV_FILE"
 else
     push_rollback "rm -f '$ENV_FILE'"
-fi
-
-if [ -f "$ENV_FILE" ]; then
-    API_KEY_EXISTING="$(grep -E '^CONCH_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
-    [ -z "$API_KEY" ] && API_KEY="$API_KEY_EXISTING"
-    ok "Preserving existing configuration and durable job settings"
-else
     if [ -z "$API_KEY" ]; then
         API_KEY="$(head -c 32 /dev/urandom 2>/dev/null | base64 | tr -d '=+' | head -c 43)"
         ok "Generated new API key"
@@ -670,45 +703,17 @@ CONCH_ALLOW_NO_AUTH=$ALLOW_NO_AUTH
 EOF
     chmod 600 "$ENV_FILE.tmp.$$"
     mv -f "$ENV_FILE.tmp.$$" "$ENV_FILE"
+    ok "Config written atomically: $ENV_FILE"
 fi
 
-set_env_value() {
-    local key="$1" value="$2" tmp="$ENV_FILE.tmp.$$"
-    awk -v key="$key" -v value="$value" '
-        BEGIN { found = 0 }
-        index($0, key "=") == 1 { print key "=" value; found = 1; next }
-        { print }
-        END { if (!found) print key "=" value }
-    ' "$ENV_FILE" > "$tmp"
-    chmod 600 "$tmp"
-    mv -f "$tmp" "$ENV_FILE"
-}
-
-$API_KEY_SET && set_env_value "CONCH_API_KEY" "$API_KEY"
-$PORT_SET && set_env_value "CONCH_PORT" "$PORT"
-$HOST_SET && set_env_value "CONCH_HOST" "$HOST"
-$TIMEOUT_SET && set_env_value "CONCH_TIMEOUT" "$TIMEOUT"
-$MAX_TIMEOUT_SET && set_env_value "CONCH_MAX_TIMEOUT" "$MAX_TIMEOUT"
-$NO_AUTH_SET && set_env_value "CONCH_ALLOW_NO_AUTH" "$ALLOW_NO_AUTH"
-
-API_KEY="$(grep -E '^CONCH_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
-if [ -z "$API_KEY" ] && [ "$ALLOW_NO_AUTH" != "true" ]; then
-    API_KEY="$(head -c 32 /dev/urandom 2>/dev/null | base64 | tr -d '=+' | head -c 43)"
-    set_env_value "CONCH_API_KEY" "$API_KEY"
-fi
-PORT="$(grep -E '^CONCH_PORT=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "$PORT")"
-ALLOW_NO_AUTH="$(grep -E '^CONCH_ALLOW_NO_AUTH=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "$ALLOW_NO_AUTH")"
-
-ok "Config written atomically: $ENV_FILE"
-info "API key is stored in protected config and is not printed"
 if [ "$ALLOW_NO_AUTH" = "true" ]; then
-    warn "Authentication is DISABLED 闁?do not expose to untrusted networks!"
+    warn "Authentication is DISABLED - do not expose to untrusted networks!"
 fi
 
 STEP=$((STEP + 1))
 
 # ============================================================================
-# Step 6 闁?Register & start service
+# Step 6 - Register & start service
 # ============================================================================
 step $STEP $TOTAL_STEPS "Registering service..."
 
@@ -888,12 +893,16 @@ fi
 # ============================================================================
 rpad=$((46 - 2 - 21))  # "Installation Complete" = 21 chars
 echo ""
-echo "  ${GREEN}闁崇儤鏌￠弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽${RESET}"
-printf "  ${GREEN}闁? ${BOLD}%s${RESET}%*s${GREEN}闁?{RESET}\n" "Installation Complete" "$rpad" ""
-echo "  ${GREEN}闁崇儤鍩冮弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽畷${RESET}"
+echo "  ${GREEN}+----------------------------------------------+${RESET}"
+printf "  ${GREEN}|  ${BOLD}%s${RESET}%*s${GREEN}|${RESET}\n" "Installation Complete" "$rpad" ""
+echo "  ${GREEN}+----------------------------------------------+${RESET}"
 echo ""
 echo "  ${CYAN}Health check:${RESET}   curl -s http://localhost:${PORT}/health"
-echo "  ${CYAN}API key:${RESET}       stored in protected config (not printed)"
+if [ -n "$API_KEY" ]; then
+    echo "  ${CYAN}API key:${RESET}       ${API_KEY}"
+else
+    echo "  ${CYAN}API key:${RESET}       not required (authentication disabled)"
+fi
 echo "  ${CYAN}Config file:${RESET}   ${ENV_FILE}"
 echo ""
 if [ "$PLATFORM" = "linux" ]; then
@@ -907,4 +916,4 @@ elif [ "$PLATFORM" = "termux" ]; then
 fi
 echo ""
 
-) # end subshell 闁?protects the user's shell from exit
+) # end subshell - protects the user's shell from exit

@@ -6,6 +6,15 @@ installer="$repo_root/scripts/install.sh"
 
 bash -n "$installer"
 
+if LC_ALL=C grep -n '[^ -~	]' "$installer"; then
+    echo "installer must remain ASCII-only for cross-terminal portability" >&2
+    exit 1
+fi
+if grep -Eq '(^|[^$])\{RESET\}' "$installer"; then
+    echo "installer contains a literal, non-expanded {RESET} placeholder" >&2
+    exit 1
+fi
+
 assert_contains() {
     local needle="$1"
     grep -Fq -- "$needle" "$installer" ||
@@ -14,15 +23,22 @@ assert_contains() {
 
 assert_contains 'checksums.txt'
 assert_contains 'Verified SHA-256'
-assert_contains 'Preserving existing configuration and durable job settings'
-assert_contains 'ENV_BACKUP="${ENV_FILE}.previous"'
 assert_contains 'SERVICE_WAS_ACTIVE=false'
 assert_contains 'systemctl stop conch 2>/dev/null || true; cp -f'
 assert_contains 'sv stop '"'"'$SVC_DIR'"'"' 2>/dev/null || true; cp -f'
-assert_contains 'stored in protected config (not printed)'
+assert_contains 'Existing configuration preserved without changes'
+assert_contains 'EXISTING_CONFIG_SHA256="$(file_sha256 "$ENV_FILE")"'
+assert_contains 'Existing configuration changed during upgrade; refusing to continue'
+assert_contains 'Configuration override flags cannot be used during an in-place upgrade'
+assert_contains 'Existing API key contains unsupported characters and cannot be printed safely'
+assert_contains 'API key:${RESET}       ${API_KEY}'
 assert_contains '^v[0-9]+\.[0-9]+\.[0-9]+$'
 assert_contains 'if $SERVICE_WAS_ACTIVE; then systemctl start conch'
 assert_contains 'if $SERVICE_WAS_ACTIVE; then sv up'
+assert_contains 'REPO_IS_TEMP=true'
+assert_contains 'Retrying verified download for $name'
+assert_contains 'Could not download and verify $SERVER_BIN_NAME'
+assert_contains 'The existing installation was left unchanged.'
 
 if bash "$installer" --port invalid --no-start >/dev/null 2>&1; then
     echo "installer accepted an invalid port" >&2
@@ -33,8 +49,13 @@ if bash "$installer" --version v1x0x9 --no-start >/dev/null 2>&1; then
     exit 1
 fi
 
-if grep -Eq 'API key:.*\$API_KEY|echo[[:space:]]+"?\$API_KEY' "$installer"; then
-    echo "installer prints the API key" >&2
+if grep -Fq 'stored in protected config (not printed)' "$installer"; then
+    echo "installer still hides the effective API key" >&2
+    exit 1
+fi
+if grep -Fq '$API_KEY_SET && set_env_value' "$installer" ||
+   grep -Fq '$PORT_SET && set_env_value' "$installer"; then
+    echo "installer can overwrite an existing configuration" >&2
     exit 1
 fi
 
