@@ -142,8 +142,8 @@ if ($releaseParseErrors.Count -gt 0) {
     throw "build-release.ps1 parser errors: $($releaseParseErrors -join '; ')"
 }
 $releaseBuilderText = [IO.File]::ReadAllText($releaseBuilderPath)
-if (-not $releaseBuilderText.Contains('$checksumLines = foreach ($target in ($targets | Sort-Object Name)) {')) {
-    throw "Release checksum manifest is not sorted deterministically"
+if (-not $releaseBuilderText.Contains('[Array]::Sort($checksumNames, [StringComparer]::Ordinal)')) {
+    throw "Release checksum manifest is not sorted with ordinal semantics"
 }
 if (-not $releaseBuilderText.Contains('$checksumContent = [string]::Join("`n", $checksumLines) + "`n"')) {
     throw "Release checksum manifest is not normalized to LF"

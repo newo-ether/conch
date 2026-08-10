@@ -73,10 +73,12 @@ try {
     $env:CGO_ENABLED = $oldCGO
 }
 
-$checksumLines = foreach ($target in ($targets | Sort-Object Name)) {
-    $path = Join-Path $resolvedOutput $target.Name
+$checksumNames = [string[]]@($targets | ForEach-Object { $_.Name })
+[Array]::Sort($checksumNames, [StringComparer]::Ordinal)
+$checksumLines = foreach ($name in $checksumNames) {
+    $path = Join-Path $resolvedOutput $name
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
-    "$hash  $($target.Name)"
+    "$hash  $name"
 }
 $checksumPath = Join-Path $resolvedOutput "checksums.txt"
 $checksumContent = [string]::Join("`n", $checksumLines) + "`n"
