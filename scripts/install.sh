@@ -148,7 +148,7 @@ download_url() {
 expected_release_hash() {
     local name="$1"
     if [ ! -f "$CHECKSUM_MANIFEST" ]; then
-        info "Downloading release checksum manifest..."
+        info "Downloading release checksum manifest..." >&2
         download_url "$GITHUB_RELEASES/checksums.txt" "$CHECKSUM_MANIFEST" "download checksums.txt" ||
             return 1
     fi

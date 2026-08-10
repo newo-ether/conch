@@ -15,6 +15,22 @@ if grep -Eq '(^|[^$])\{RESET\}' "$installer"; then
     exit 1
 fi
 
+checksum_contract_tmp="$(mktemp -d)"
+trap 'rm -rf -- "$checksum_contract_tmp"' EXIT
+(
+    CHECKSUM_MANIFEST="$checksum_contract_tmp/checksums.txt"
+    GITHUB_RELEASES="https://example.invalid/releases"
+    expected_hash="e26b899c9c77b3d29edd0f69d62e003992779dee4531908dc1aeb11d45482948"
+    info() { printf 'INFO %s\n' "$*"; }
+    download_url() { printf '%s  conch-linux-arm64\n' "$expected_hash" > "$2"; }
+    eval "$(sed -n '/^expected_release_hash() {$/,/^}$/p' "$installer")"
+    captured="$(expected_release_hash conch-linux-arm64 2> "$checksum_contract_tmp/stderr")"
+    if [ "$captured" != "$expected_hash" ]; then
+        echo "expected_release_hash polluted captured stdout: $captured" >&2
+        exit 1
+    fi
+)
+
 assert_contains() {
     local needle="$1"
     grep -Fq -- "$needle" "$installer" ||
