@@ -8,10 +8,13 @@ import (
 	"time"
 )
 
-func TestDecodeShellOutputLineFallsBackToGBK(t *testing.T) {
-	got := decodeShellOutputLine([]byte{0xD6, 0xD0, 0xCE, 0xC4})
-	if got != "中文" {
-		t.Fatalf("decoded output = %q, want %q", got, "中文")
+func TestDecodeWindowsCodePageSupportsGBK(t *testing.T) {
+	got, ok := decodeWindowsCodePage(
+		[]byte{0xD6, 0xD0, 0xCE, 0xC4},
+		simplifiedChineseCodePage,
+	)
+	if !ok || got != "中文" {
+		t.Fatalf("decoded output = (%q, %v), want (%q, true)", got, ok, "中文")
 	}
 }
 
