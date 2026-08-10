@@ -29,7 +29,7 @@ func (h *JobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponse(w, map[string]string{"error": err.Error()}, aesKey)
+		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
 		return
 	}
 
@@ -47,14 +47,32 @@ func (h *JobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONResponse(w, jobResponse(job, true), aesKey)
 	case "list":
+		jobs := h.Jobs.List()
+		summaries := make([]map[string]any, 0, len(jobs))
+		for _, job := range jobs {
+			summaries = append(summaries, jobListResponse(job))
+		}
 		writeJSONResponse(w, map[string]any{
 			"type": "list_shell_jobs",
-			"jobs": h.Jobs.List(),
+			"jobs": summaries,
 		}, aesKey)
-	case "get", "stop":
+	case "get", "stop", "ack":
 		var req jobIDRequest
 		if json.Unmarshal(plaintext, &req) != nil || req.JobID == "" {
 			writeJSONResponse(w, map[string]string{"error": "job_id is required"}, aesKey)
+			return
+		}
+		if h.Action == "ack" {
+			acknowledged, ackErr := h.Jobs.Acknowledge(req.JobID)
+			if ackErr != nil {
+				writeJSONResponse(w, map[string]string{"error": ackErr.Error()}, aesKey)
+				return
+			}
+			writeJSONResponse(w, map[string]any{
+				"type":         "shell_job_ack",
+				"job_id":       req.JobID,
+				"acknowledged": acknowledged,
+			}, aesKey)
 			return
 		}
 		var job shell.Job
@@ -68,7 +86,14 @@ func (h *JobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONResponse(w, map[string]string{"error": "job not found"}, aesKey)
 			return
 		}
-		writeJSONResponse(w, jobResponse(job, job.State == shell.JobStateRunning), aesKey)
+		writeJSONResponse(
+			w,
+			jobResponse(
+				job,
+				job.State == shell.JobStateRunning || job.State == shell.JobStateStopping || job.State == shell.JobStateSettling,
+			),
+			aesKey,
+		)
 	default:
 		writeJSONResponse(w, map[string]string{"error": "unknown job action"}, aesKey)
 	}
@@ -95,5 +120,23 @@ func jobResponse(job shell.Job, background bool) map[string]any {
 	if job.Error != "" {
 		response["error"] = job.Error
 	}
+	if job.Warning != "" {
+		response["warning"] = job.Warning
+	}
+	if job.SettlementError != "" {
+		response["settlement_error"] = job.SettlementError
+	}
+	return response
+}
+
+// List responses intentionally omit rolling output. At the configured maxima, serializing every
+// retained job body could turn one status query into a roughly 25 MiB model/tool result. The job
+// remains fully retrievable by ID through /jobs/get until the bounded retention policy evicts it.
+func jobListResponse(job shell.Job) map[string]any {
+	response := jobResponse(
+		job,
+		job.State == shell.JobStateRunning || job.State == shell.JobStateStopping || job.State == shell.JobStateSettling,
+	)
+	delete(response, "output")
 	return response
 }

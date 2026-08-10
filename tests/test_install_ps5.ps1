@@ -83,4 +83,51 @@ if ($script:mockStartCalls -ne 1) {
     throw "Expected exactly one service start attempt, got $script:mockStartCalls"
 }
 
+# Release downloads must be pinned, checksummed, and must not terminate a
+# running MCP process during an in-place path swap.
+foreach ($required in @("Get-ExpectedReleaseHash", "Copy-IfDifferent")) {
+    if (-not $functions.ContainsKey($required)) {
+        throw "Missing installer hardening helper: $required"
+    }
+}
+$copyText = $functions["Copy-IfDifferent"].Extent.Text
+if ($copyText -match "Stop-Process") {
+    throw "Copy-IfDifferent must not terminate a running MCP process"
+}
+if ($installerText -notmatch '(?s)Installation failed.*?\bthrow\s*\r?\n\}') {
+    throw "Installer catch path does not propagate a nonzero failure"
+}
+foreach ($marker in @(
+    "checksums.txt",
+    "Verified SHA-256",
+    "Preserving existing configuration and durable job settings",
+    "Restore previous configuration",
+    "Restore previous conch.exe and service registration",
+    "Restore previous service running state",
+    "ValidateRange(1, 65535)",
+    "TimeoutSec must not exceed MaxTimeoutSec"
+)) {
+    if ($installerText -notmatch [Regex]::Escape($marker)) {
+        throw "Missing installer hardening marker: $marker"
+    }
+}
+
+$tempManifest = Join-Path $env:TEMP ("conch-checksums-" + [Guid]::NewGuid().ToString("N") + ".txt")
+try {
+    $expectedHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    [IO.File]::WriteAllText(
+        $tempManifest,
+        "$expectedHash  conch-windows-amd64.exe`n",
+        [Text.Encoding]::ASCII
+    )
+    $ChecksumManifest = $tempManifest
+    . ([scriptblock]::Create($functions["Get-ExpectedReleaseHash"].Extent.Text))
+    $parsedHash = Get-ExpectedReleaseHash "conch-windows-amd64.exe"
+    if ($parsedHash -ne $expectedHash) {
+        throw "Checksum parser returned '$parsedHash'"
+    }
+} finally {
+    Remove-Item -Force -LiteralPath $tempManifest -ErrorAction SilentlyContinue
+}
+
 Write-Host "install.ps1 PowerShell 5 regression checks passed."

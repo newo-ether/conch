@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/newo-ether/conch/buildinfo"
 	"github.com/newo-ether/conch/config"
 	"github.com/newo-ether/conch/crypto"
 	"github.com/newo-ether/conch/handler"
@@ -17,7 +19,15 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "version") {
+		fmt.Println(buildinfo.String("conch"))
+		return
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
 
 	if cfg.APIKey == "" && !cfg.AllowNoAuth {
 		log.Fatalf("CONCH_API_KEY is required. Set CONCH_ALLOW_NO_AUTH=true to override (insecure).")
@@ -26,7 +36,7 @@ func main() {
 		log.Println("WARNING: CONCH_API_KEY is not set — all requests will be allowed without authentication")
 	}
 
-	// Generate persistent X25519 key pair
+	// Generate the process-local X25519 key pair advertised by /version
 	keyPair, err := crypto.GenerateKeyPair()
 	if err != nil {
 		log.Fatalf("failed to generate X25519 key pair: %v", err)
@@ -34,7 +44,8 @@ func main() {
 	log.Printf("Server public key: %s", keyPair.PublicKeyBase64())
 
 	nonceTracker := crypto.NewNonceTracker()
-	rateLimiter := handler.NewRateLimiter(20, 40) // 20 req/s sustained, burst 40
+	rateLimiter := handler.NewRateLimiter(20, 40, cfg.TrustedProxies...) // 20 req/s sustained, burst 40
+	defer rateLimiter.Close()
 	apiKeyBytes := []byte(cfg.APIKey)
 
 	executor := shell.NewExecutor(cfg.Timeout, cfg.MaxTimeout)
@@ -61,6 +72,7 @@ func main() {
 	fileReadHandler := &handler.FileReadHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
 	fileImageHandler := &handler.FileImageHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
 	fileWriteHandler := &handler.FileWriteHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
+	fileEditHandler := &handler.FileEditHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
 	fileGlobHandler := &handler.FileGlobHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
 	fileGrepHandler := &handler.FileGrepHandler{APIKey: apiKeyBytes, KeyPair: keyPair}
 
@@ -77,12 +89,17 @@ func main() {
 	mux.Handle("POST /jobs/stop", auth(&handler.JobHandler{
 		Action: "stop", Jobs: jobManager, APIKey: apiKeyBytes, KeyPair: keyPair,
 	}))
+	mux.Handle("POST /jobs/ack", auth(&handler.JobHandler{
+		Action: "ack", Jobs: jobManager, APIKey: apiKeyBytes, KeyPair: keyPair,
+	}))
 	mux.Handle("POST /file/read", auth(fileReadHandler))
 	mux.Handle("POST /file/image", auth(fileImageHandler))
 	mux.Handle("POST /file/write", auth(fileWriteHandler))
+	mux.Handle("POST /file/edit", auth(fileEditHandler))
 	mux.Handle("POST /file/glob", auth(fileGlobHandler))
 	mux.Handle("POST /file/grep", auth(fileGrepHandler))
 	mux.HandleFunc("GET /health", handler.HealthHandler)
+	mux.HandleFunc("GET /version", handler.VersionHandler)
 	mux.HandleFunc("GET /public-key", func(w http.ResponseWriter, r *http.Request) {
 		nonce, err := crypto.GenerateNonce()
 		if err != nil {
@@ -106,24 +123,38 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      0, // SSE requires unbounded write timeout
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	serveErr := make(chan error, 1)
 	go func() {
 		log.Printf("conch listening on %s:%d", cfg.Host, cfg.Port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
-		}
+		serveErr <- srv.ListenAndServe()
 	}()
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+		log.Println("shutdown signal received")
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("ERROR: HTTP server stopped unexpectedly: %v", err)
+		}
+		stop()
+	}
 	log.Println("shutting down...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("shutdown error: %v", err)
+	jobShutdownCtx, cancelJobs := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := jobManager.Close(jobShutdownCtx); err != nil {
+		log.Printf("ERROR: background job shutdown incomplete: %v", err)
 	}
+	cancelJobs()
+
+	shutdownCtx, cancelServer := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("ERROR: HTTP shutdown incomplete: %v", err)
+	}
+	cancelServer()
 }

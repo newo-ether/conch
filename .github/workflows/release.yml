@@ -1,0 +1,69 @@
+name: Release assets
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify source
+        run: |
+          go test ./...
+          go test -race ./...
+          go vet ./...
+          bash tests/test_install_sh.sh
+      - name: Build deterministic assets
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          build_time="$(git show -s --format=%cI HEAD)"
+          ldflags="-s -w -X github.com/newo-ether/conch/buildinfo.Version=$VERSION -X github.com/newo-ether/conch/buildinfo.Revision=$revision -X github.com/newo-ether/conch/buildinfo.BuildTime=$build_time"
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/conch-linux-arm64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/conch-linux-amd64 .
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/conch-windows-amd64.exe .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/conch-mcp-linux-arm64 ./cmd/mcp
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/conch-mcp-linux-amd64 ./cmd/mcp
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/conch-mcp-windows-amd64.exe ./cmd/mcp
+          (cd dist && sha256sum conch-* > checksums.txt)
+          ./dist/conch-linux-amd64 --version | grep -F "$VERSION"
+          ./dist/conch-mcp-linux-amd64 --version | grep -F "$VERSION"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            dist/conch-linux-arm64
+            dist/conch-linux-amd64
+            dist/conch-windows-amd64.exe
+            dist/conch-mcp-linux-arm64
+            dist/conch-mcp-linux-amd64
+            dist/conch-mcp-windows-amd64.exe
+            dist/checksums.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

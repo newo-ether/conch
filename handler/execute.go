@@ -2,11 +2,14 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"time"
 
+	"github.com/newo-ether/conch/buildinfo"
 	"github.com/newo-ether/conch/crypto"
 	"github.com/newo-ether/conch/shell"
 )
@@ -87,45 +90,77 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	events := h.Executor.Execute(r.Context(), req)
+	responseController := http.NewResponseController(w)
 
 	for evt := range events {
+		var eventName string
 		var payload string
-		if evt.Error != "" {
-			data, _ := json.Marshal(map[string]string{"message": evt.Error})
-			payload = string(data)
-			writeSSE(w, "error", payload, aesKey)
+		if evt.Warning != "" {
+			// Its own event type so a client can surface degraded output without treating the
+			// command as failed and without losing the exit code that still follows.
+			data, _ := json.Marshal(map[string]string{"message": evt.Warning})
+			eventName, payload = "warning", string(data)
+		} else if evt.Error != "" {
+			data, _ := json.Marshal(map[string]any{
+				// timed_out is the machine-readable discriminator. The message text is for
+				// humans only; clients decide whether to promote a command to a background
+				// job from this flag alone, never by pattern-matching the message.
+				"message":   evt.Error,
+				"timed_out": evt.TimedOut,
+			})
+			eventName, payload = "error", string(data)
 		} else if evt.ExitCode != nil {
 			data, _ := json.Marshal(map[string]int{"exit_code": *evt.ExitCode})
-			payload = string(data)
-			writeSSE(w, "result", payload, aesKey)
+			eventName, payload = "result", string(data)
 		} else {
 			data, _ := json.Marshal(map[string]string{
 				"line":   evt.Line,
 				"stream": evt.Stream,
 			})
-			payload = string(data)
-			writeSSE(w, "line", payload, aesKey)
+			eventName, payload = "line", string(data)
+		}
+
+		// The server-level write timeout is intentionally disabled for SSE. Bound each actual write
+		// instead so an authenticated client that stops reading cannot pin a handler forever.
+		if err := responseController.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil &&
+			!errors.Is(err, http.ErrNotSupported) {
+			log.Printf("ERROR: setting SSE write deadline: %v", err)
+			return
+		}
+		if err := writeSSE(w, eventName, payload, aesKey); err != nil {
+			log.Printf("ERROR: writing SSE event: %v", err)
+			return
 		}
 		flusher.Flush()
 	}
 }
 
-func writeSSE(w io.Writer, event, payload string, aesKey []byte) {
+func writeSSE(w io.Writer, event, payload string, aesKey []byte) error {
 	var data string
 	if aesKey != nil {
 		encrypted, err := crypto.Encrypt(aesKey, []byte(payload))
 		if err != nil {
-			log.Printf("ERROR: SSE encryption failed: %v", err)
-			return
+			return fmt.Errorf("encrypt SSE event: %w", err)
 		}
 		data = encrypted
 	} else {
 		data = payload
 	}
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+	_, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+	return err
 }
 
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"ok"}`))
+	response := map[string]any{"status": "ok"}
+	metadata := buildinfo.Current("conch")
+	response["version"] = metadata.Version
+	response["revision"] = metadata.Revision
+	response["protocol_version"] = metadata.ProtocolVersion
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func VersionHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(buildinfo.Current("conch"))
 }

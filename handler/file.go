@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -13,13 +14,15 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/newo-ether/conch/crypto"
 )
 
-const maxFileSize = 1 << 20       // 1 MB
-const maxImageFileSize = 20 << 20 // 20 MB
+const maxFileSize = 1 << 20          // 1 MB request/response content
+const maxEditableFileSize = 16 << 20 // 16 MB server-side edit
+const maxImageFileSize = 20 << 20    // 20 MB
 
 // grepMaxFileSize bounds per-file reads during grep so a single huge file cannot
 // exhaust memory; mirrors the 500 KB cap used by the on-device sandbox backend.
@@ -27,6 +30,8 @@ const grepMaxFileSize = 500 * 1024
 
 // grepMaxContentLen truncates a returned matching line, matching the other backends.
 const grepMaxContentLen = 500
+
+const maxFileSearchDuration = 30 * time.Second
 
 // FileReadRequest is the decrypted body for POST /file/read.
 type FileReadRequest struct {
@@ -39,6 +44,8 @@ type FileReadResponse struct {
 	Content    string `json:"content"`
 	Lines      int    `json:"lines"`
 	TotalLines int    `json:"totalLines"`
+	Size       int64  `json:"size"`
+	Truncated  bool   `json:"truncated"`
 }
 
 // FileImageRequest is the decrypted body for POST /file/image.
@@ -54,12 +61,28 @@ type FileImageResponse struct {
 
 // FileWriteRequest is the decrypted body for POST /file/write.
 type FileWriteRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path           string `json:"path"`
+	Content        string `json:"content"`
+	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
 }
 
 type FileWriteResponse struct {
-	OK bool `json:"ok"`
+	OK     bool   `json:"ok"`
+	SHA256 string `json:"sha256"`
+}
+
+type FileEditRequest struct {
+	Path           string `json:"path"`
+	OldString      string `json:"old_string"`
+	NewString      string `json:"new_string"`
+	ReplaceAll     bool   `json:"replace_all"`
+	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
+}
+
+type FileEditResponse struct {
+	OK           bool   `json:"ok"`
+	Replacements int    `json:"replacements"`
+	SHA256       string `json:"sha256"`
 }
 
 // FileGlobRequest is the decrypted body for POST /file/glob.
@@ -74,7 +97,8 @@ type FileGlobRequest struct {
 }
 
 type FileGlobResponse struct {
-	Files []string `json:"files"`
+	Files     []string `json:"files"`
+	Truncated bool     `json:"truncated"`
 }
 
 // FileGrepRequest is the decrypted body for POST /file/grep.
@@ -91,7 +115,8 @@ type GrepMatch struct {
 }
 
 type FileGrepResponse struct {
-	Matches []GrepMatch `json:"matches"`
+	Matches   []GrepMatch `json:"matches"`
+	Truncated bool        `json:"truncated"`
 }
 
 // decryptBody handles the shared encryption-detection logic.
@@ -126,6 +151,10 @@ func decryptBody(r *http.Request, bodyBytes []byte, apiKey []byte, keyPair *cryp
 }
 
 func writeJSONResponse(w http.ResponseWriter, v any, aesKey []byte) {
+	writeJSONResponseStatus(w, http.StatusOK, v, aesKey)
+}
+
+func writeJSONResponseStatus(w http.ResponseWriter, status int, v any, aesKey []byte) {
 	var data []byte
 	if v != nil {
 		data, _ = json.Marshal(v)
@@ -145,7 +174,8 @@ func writeJSONResponse(w http.ResponseWriter, v any, aesKey []byte) {
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write([]byte(body))
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body))
 }
 
 // FileReadHandler serves POST /file/read.
@@ -163,7 +193,7 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponse(w, map[string]string{"error": err.Error()}, aesKey)
+		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
 		return
 	}
 
@@ -189,6 +219,15 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("stat: %v", err)}, aesKey)
+		return
+	}
+	if !info.Mode().IsRegular() {
+		writeJSONResponse(w, map[string]string{"error": "path is not a regular file"}, aesKey)
+		return
+	}
 
 	if req.Offset > 0 {
 		if _, err := f.Seek(req.Offset, io.SeekStart); err != nil {
@@ -216,10 +255,17 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	truncated := req.Offset+int64(n) < info.Size()
+	totalLines := 0
+	if req.Offset == 0 && !truncated {
+		totalLines = lines
+	}
 	resp := FileReadResponse{
 		Content:    content,
 		Lines:      lines,
-		TotalLines: lines, // not scanning whole file for total
+		TotalLines: totalLines,
+		Size:       info.Size(),
+		Truncated:  truncated,
 	}
 	writeJSONResponse(w, resp, aesKey)
 }
@@ -240,7 +286,7 @@ func (h *FileImageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponse(w, map[string]string{"error": err.Error()}, aesKey)
+		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
 		return
 	}
 
@@ -316,7 +362,7 @@ func (h *FileWriteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponse(w, map[string]string{"error": err.Error()}, aesKey)
+		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
 		return
 	}
 
@@ -334,16 +380,134 @@ func (h *FileWriteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.MkdirAll(filepath.Dir(req.Path), 0755); err != nil {
-		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("mkdir: %v", err)}, aesKey)
-		return
-	}
-	if err := os.WriteFile(req.Path, []byte(req.Content), 0644); err != nil {
+	hash, err := atomicWriteFile(req.Path, []byte(req.Content), req.ExpectedSHA256)
+	if err != nil {
 		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("write: %v", err)}, aesKey)
 		return
 	}
 
-	writeJSONResponse(w, FileWriteResponse{OK: true}, aesKey)
+	writeJSONResponse(w, FileWriteResponse{OK: true, SHA256: hash}, aesKey)
+}
+
+// FileEditHandler performs a bounded server-side compare-and-swap edit. The entire file is read
+// and replaced on the target host, so MCP never rewrites a truncated /file/read response.
+type FileEditHandler struct {
+	APIKey  []byte
+	KeyPair *crypto.KeyPair
+}
+
+func (h *FileEditHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
+	if err != nil {
+		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
+		return
+	}
+
+	var req FileEditRequest
+	if err := json.Unmarshal(plaintext, &req); err != nil {
+		writeJSONResponse(w, map[string]string{"error": "invalid json"}, aesKey)
+		return
+	}
+	if req.Path == "" {
+		writeJSONResponse(w, map[string]string{"error": "path is required"}, aesKey)
+		return
+	}
+	if req.OldString == "" {
+		writeJSONResponse(w, map[string]string{"error": "old_string is required"}, aesKey)
+		return
+	}
+
+	unlock := lockFileMutation(req.Path)
+	defer unlock()
+
+	file, err := os.Open(req.Path)
+	if err != nil {
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("open: %v", err)}, aesKey)
+		return
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("stat: %v", err)}, aesKey)
+		return
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		writeJSONResponse(w, map[string]string{"error": "path is not a regular file"}, aesKey)
+		return
+	}
+	if info.Size() > maxEditableFileSize {
+		_ = file.Close()
+		writeJSONResponse(w, map[string]string{"error": "file exceeds 16MB edit limit"}, aesKey)
+		return
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maxEditableFileSize+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("read: %v", readErr)}, aesKey)
+		return
+	}
+	if closeErr != nil {
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("close: %v", closeErr)}, aesKey)
+		return
+	}
+	if len(data) > maxEditableFileSize {
+		writeJSONResponse(w, map[string]string{"error": "file exceeds 16MB edit limit"}, aesKey)
+		return
+	}
+	currentHash := crypto.SHA256Hex(data)
+	if req.ExpectedSHA256 != "" && !strings.EqualFold(req.ExpectedSHA256, currentHash) {
+		writeJSONResponse(w, map[string]string{
+			"error": fmt.Sprintf(
+				"file changed concurrently: expected sha256 %s, got %s",
+				req.ExpectedSHA256,
+				currentHash,
+			),
+		}, aesKey)
+		return
+	}
+
+	content := string(data)
+	count := strings.Count(content, req.OldString)
+	if count == 0 {
+		writeJSONResponse(w, map[string]string{"error": "old_string not found in file"}, aesKey)
+		return
+	}
+	if count > 1 && !req.ReplaceAll {
+		writeJSONResponse(w, map[string]string{
+			"error": fmt.Sprintf(
+				"found %d matches of old_string; set replace_all=true or provide a unique match",
+				count,
+			),
+		}, aesKey)
+		return
+	}
+	replacementCount := count
+	replaced := strings.ReplaceAll(content, req.OldString, req.NewString)
+	if !req.ReplaceAll {
+		replacementCount = 1
+		replaced = strings.Replace(content, req.OldString, req.NewString, 1)
+	}
+	if len(replaced) > maxEditableFileSize {
+		writeJSONResponse(w, map[string]string{"error": "edited file exceeds 16MB limit"}, aesKey)
+		return
+	}
+
+	hash, err := atomicWriteFileLocked(req.Path, []byte(replaced), currentHash)
+	if err != nil {
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("edit: %v", err)}, aesKey)
+		return
+	}
+	writeJSONResponse(w, FileEditResponse{
+		OK:           true,
+		Replacements: replacementCount,
+		SHA256:       hash,
+	}, aesKey)
 }
 
 // FileGlobHandler serves POST /file/glob.
@@ -361,7 +525,7 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponse(w, map[string]string{"error": err.Error()}, aesKey)
+		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
 		return
 	}
 
@@ -383,8 +547,15 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if req.Depth != nil && *req.Depth > 0 {
 		maxDepth = *req.Depth
 	}
-	matches := globWithDepth(req.Path, req.Pattern, maxDepth)
+	searchCtx, cancel := context.WithTimeout(r.Context(), maxFileSearchDuration)
+	defer cancel()
+	matches, err := globWithDepth(searchCtx, req.Path, req.Pattern, maxDepth)
+	if err != nil {
+		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("glob: %v", err)}, aesKey)
+		return
+	}
 
+	truncated := len(matches) >= 1000
 	if len(matches) > 1000 {
 		matches = matches[:1000]
 	}
@@ -392,7 +563,7 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		matches = []string{}
 	}
 
-	writeJSONResponse(w, FileGlobResponse{Files: matches}, aesKey)
+	writeJSONResponse(w, FileGlobResponse{Files: matches, Truncated: truncated}, aesKey)
 }
 
 // globWithDepth recursively walks root and returns files matching pattern,
@@ -401,7 +572,7 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // matches basenames at any depth; otherwise the pattern is matched against the
 // path relative to root. '**' is supported via doublestar, giving the same
 // semantics as the Java PathMatcher used by the Kotlin backends.
-func globWithDepth(root, pattern string, maxDepth int) []string {
+func globWithDepth(ctx context.Context, root, pattern string, maxDepth int) ([]string, error) {
 	matches := make([]string, 0)
 	rootClean := filepath.Clean(root)
 	rootSeps := strings.Count(rootClean, string(os.PathSeparator))
@@ -410,7 +581,10 @@ func globWithDepth(root, pattern string, maxDepth int) []string {
 	if !strings.Contains(pattern, "/") {
 		matchPattern = "**/" + pattern
 	}
-	filepath.Walk(rootClean, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(rootClean, func(path string, info os.FileInfo, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil || path == rootClean {
 			return nil
 		}
@@ -436,7 +610,7 @@ func globWithDepth(root, pattern string, maxDepth int) []string {
 		}
 		return nil
 	})
-	return matches
+	return matches, err
 }
 
 // FileGrepHandler serves POST /file/grep.
@@ -454,7 +628,7 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponse(w, map[string]string{"error": err.Error()}, aesKey)
+		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
 		return
 	}
 
@@ -487,7 +661,12 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	searchCtx, cancel := context.WithTimeout(r.Context(), maxFileSearchDuration)
+	defer cancel()
 	err = filepath.Walk(req.Path, func(path string, info os.FileInfo, err error) error {
+		if ctxErr := searchCtx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -501,7 +680,9 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if info.Size() > grepMaxFileSize {
 			return nil
 		}
-		grepFile(path, re, &matches)
+		if err := grepFile(searchCtx, path, re, &matches); err != nil {
+			return err
+		}
 		if len(matches) >= 500 {
 			return filepath.SkipAll
 		}
@@ -513,28 +694,34 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSONResponse(w, FileGrepResponse{Matches: matches}, aesKey)
+	writeJSONResponse(w, FileGrepResponse{
+		Matches:   matches,
+		Truncated: len(matches) >= 500,
+	}, aesKey)
 }
 
 // grepFile streams a single file line-by-line, appending matches (up to the
 // global 500 cap) to matches. Binary files — detected by a NUL byte in the head,
 // the same heuristic grep uses — are skipped so they don't emit garbage matches.
-func grepFile(path string, re *regexp.Regexp, matches *[]GrepMatch) {
+func grepFile(ctx context.Context, path string, re *regexp.Regexp, matches *[]GrepMatch) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return
+		return nil
 	}
 	defer f.Close()
 
 	br := bufio.NewReader(f)
 	if head, _ := br.Peek(512); bytes.IndexByte(head, 0) >= 0 {
-		return // binary file
+		return nil // binary file
 	}
 
 	scanner := bufio.NewScanner(br)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	lineNo := 0
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		lineNo++
 		line := scanner.Text()
 		if re.MatchString(line) {
@@ -543,8 +730,9 @@ func grepFile(path string, re *regexp.Regexp, matches *[]GrepMatch) {
 			}
 			*matches = append(*matches, GrepMatch{Path: path, Line: lineNo, Content: line})
 			if len(*matches) >= 500 {
-				return
+				return nil
 			}
 		}
 	}
+	return scanner.Err()
 }

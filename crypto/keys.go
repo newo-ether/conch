@@ -12,7 +12,7 @@ import (
 
 var B64 = base64.RawURLEncoding
 
-// KeyPair is a persistent X25519 key pair.
+// KeyPair is an X25519 key pair.
 type KeyPair struct {
 	PrivateKey *ecdh.PrivateKey
 	PublicKey  *ecdh.PublicKey

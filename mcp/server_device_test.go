@@ -4,11 +4,17 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	conchcrypto "github.com/newo-ether/conch/crypto"
 )
 
 func TestListDevicesIncludesUnavailableWithoutDroppingHealthyDevices(t *testing.T) {
+	keyPair, err := conchcrypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := NewServerWithUnavailable(
-		map[string]*Transport{"healthy": {}},
+		map[string]*Transport{"healthy": {serverPubKey: keyPair.PublicKey}},
 		map[string]DeviceConfig{
 			"healthy": {URL: "http://healthy", Description: "reachable"},
 			"offline": {URL: "http://offline", Description: "sleeping"},

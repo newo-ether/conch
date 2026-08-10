@@ -10,10 +10,12 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
+
+	"github.com/newo-ether/conch/buildinfo"
 )
 
 const protocolVersion = "2025-06-18"
-const serverVersion = "0.1.0"
 
 var allTools = []Tool{
 	{
@@ -32,15 +34,76 @@ var allTools = []Tool{
 			Properties: map[string]JSONProp{
 				"device":     {Type: "string", Description: "The target device name"},
 				"command":    {Type: "string", Description: "The shell command to execute"},
-				"timeout_ms": {Type: "integer", Description: "Timeout in milliseconds (default: 30000, max: 120000)", Default: 30000},
+				"timeout_ms": {Type: "integer", Description: "Timeout in milliseconds (default: 30000, server-bounded)", Default: 30000},
 				"workdir":    {Type: "string", Description: "Working directory for the command (optional)"},
 			},
 			Required: []string{"device", "command"},
 		},
 	},
 	{
+		Name:        "shell_start",
+		Description: "Start a durable background shell job without first attempting the command synchronously. Returns a job_id for later polling, stopping, and acknowledgement.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device":     {Type: "string", Description: "The target device name"},
+				"command":    {Type: "string", Description: "The shell command to execute"},
+				"timeout_ms": {Type: "integer", Description: "Job timeout in milliseconds (server-bounded)"},
+				"workdir":    {Type: "string", Description: "Working directory for the command (optional)"},
+			},
+			Required: []string{"device", "command"},
+		},
+	},
+	{
+		Name:        "shell_jobs",
+		Description: "List durable shell jobs without inlining their retained output. Use shell_job_get to retrieve one result.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device": {Type: "string", Description: "The target device name"},
+			},
+			Required: []string{"device"},
+		},
+	},
+	{
+		Name:        "shell_job_get",
+		Description: "Get one durable shell job, including bounded retained output and terminal settlement evidence.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device": {Type: "string", Description: "The target device name"},
+				"job_id": {Type: "string", Description: "Durable job identifier"},
+			},
+			Required: []string{"device", "job_id"},
+		},
+	},
+	{
+		Name:        "shell_job_stop",
+		Description: "Request cancellation of a running durable shell job and its process tree.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device": {Type: "string", Description: "The target device name"},
+				"job_id": {Type: "string", Description: "Durable job identifier"},
+			},
+			Required: []string{"device", "job_id"},
+		},
+	},
+	{
+		Name:        "shell_job_ack",
+		Description: "Acknowledge and delete one durably settled terminal job after the caller has retained its result. Running or settling jobs are rejected.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device": {Type: "string", Description: "The target device name"},
+				"job_id": {Type: "string", Description: "Durable job identifier"},
+			},
+			Required: []string{"device", "job_id"},
+		},
+	},
+	{
 		Name:        "file_read",
-		Description: "Read a file from a remote device. Returns the file content as text with line count.",
+		Description: "Read a bounded file range from a remote device. Returns content plus size and explicit truncation metadata.",
 		InputSchema: JSONSchema{
 			Type: "object",
 			Properties: map[string]JSONProp{
@@ -66,13 +129,14 @@ var allTools = []Tool{
 	},
 	{
 		Name:        "file_write",
-		Description: "Write content to a file on a remote device. Creates parent directories as needed and overwrites existing files.",
+		Description: "Atomically write content on a remote device, preserving existing permissions and optionally enforcing a SHA-256 precondition.",
 		InputSchema: JSONSchema{
 			Type: "object",
 			Properties: map[string]JSONProp{
-				"device":  {Type: "string", Description: "The target device name"},
-				"path":    {Type: "string", Description: "Absolute path to the file"},
-				"content": {Type: "string", Description: "Content to write to the file"},
+				"device":          {Type: "string", Description: "The target device name"},
+				"path":            {Type: "string", Description: "Absolute path to the file"},
+				"content":         {Type: "string", Description: "Content to write to the file"},
+				"expected_sha256": {Type: "string", Description: "Optional SHA-256 precondition; the write fails if the current file differs"},
 			},
 			Required: []string{"device", "path", "content"},
 		},
@@ -83,18 +147,19 @@ var allTools = []Tool{
 		InputSchema: JSONSchema{
 			Type: "object",
 			Properties: map[string]JSONProp{
-				"device":      {Type: "string", Description: "The target device name"},
-				"path":        {Type: "string", Description: "Absolute path to the file"},
-				"old_string":  {Type: "string", Description: "The exact text to find and replace"},
-				"new_string":  {Type: "string", Description: "The replacement text"},
-				"replace_all": {Type: "boolean", Description: "Replace all occurrences instead of requiring a unique match (default: false)"},
+				"device":          {Type: "string", Description: "The target device name"},
+				"path":            {Type: "string", Description: "Absolute path to the file"},
+				"old_string":      {Type: "string", Description: "The exact text to find and replace"},
+				"new_string":      {Type: "string", Description: "The replacement text"},
+				"replace_all":     {Type: "boolean", Description: "Replace all occurrences instead of requiring a unique match (default: false)"},
+				"expected_sha256": {Type: "string", Description: "Optional SHA-256 precondition; the edit fails if the current file differs"},
 			},
 			Required: []string{"device", "path", "old_string", "new_string"},
 		},
 	},
 	{
 		Name:        "file_glob",
-		Description: "List files and directories on a remote device matching a glob pattern. Supports * and ** wildcards.",
+		Description: "List files on a remote device matching a glob pattern. Supports * and ** wildcards and reports truncation.",
 		InputSchema: JSONSchema{
 			Type: "object",
 			Properties: map[string]JSONProp{
@@ -123,9 +188,10 @@ var allTools = []Tool{
 
 // Server is a stdio-based MCP server.
 type Server struct {
-	transports  map[string]*Transport
-	devices     map[string]DeviceConfig
-	unavailable map[string]string
+	transports       map[string]*Transport
+	devices          map[string]DeviceConfig
+	unavailable      map[string]string
+	imageConcurrency chan struct{}
 }
 
 func NewServer(transports map[string]*Transport, devices map[string]DeviceConfig) *Server {
@@ -140,19 +206,68 @@ func NewServerWithUnavailable(
 	unavailable map[string]string,
 ) *Server {
 	return &Server{
-		transports:  transports,
-		devices:     devices,
-		unavailable: unavailable,
+		transports:       transports,
+		devices:          devices,
+		unavailable:      unavailable,
+		imageConcurrency: make(chan struct{}, 2),
 	}
 }
 
-// Run starts the stdio read-eval loop. Blocks until stdin closes.
+// Run starts the stdio server. Closing stdin on cancellation unblocks the scanner during service
+// shutdown; Serve contains the testable concurrent JSON-RPC loop.
 func (s *Server) Run(ctx context.Context) error {
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = os.Stdin.Close()
+		case <-done:
+		}
+	}()
+	err := s.Serve(ctx, os.Stdin, os.Stdout)
+	close(done)
+	return err
+}
 
+func (s *Server) Serve(ctx context.Context, reader io.Reader, writer io.Writer) error {
+	ctx, cancelAll := context.WithCancel(ctx)
+	defer cancelAll()
+
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
+
+	var requestWG sync.WaitGroup
+	var writerMu sync.Mutex
+	var pendingMu sync.Mutex
+	pending := make(map[string]context.CancelFunc)
+	concurrency := make(chan struct{}, 16)
+	requestSlots := make(chan struct{}, 128)
+
+	var writeErr error
+	var writeErrMu sync.Mutex
+	var closeReaderOnce sync.Once
+	writeResponse := func(response Response) {
+		writerMu.Lock()
+		err := writeJSON(writer, response)
+		writerMu.Unlock()
+		if err != nil {
+			writeErrMu.Lock()
+			if writeErr == nil {
+				writeErr = fmt.Errorf("write response: %w", err)
+				cancelAll()
+				closeReaderOnce.Do(func() {
+					if closer, ok := reader.(io.Closer); ok {
+						_ = closer.Close()
+					}
+				})
+			}
+			writeErrMu.Unlock()
+		}
+	}
+
+scanLoop:
 	for scanner.Scan() {
-		line := scanner.Bytes()
+		line := append([]byte(nil), scanner.Bytes()...)
 		if len(line) == 0 {
 			continue
 		}
@@ -165,53 +280,151 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if err := json.Unmarshal(line, &base); err != nil {
 			log.Printf("ERROR: invalid JSON-RPC: %v", err)
+			writeResponse(Response{
+				JSONRPC: "2.0",
+				Error:   &Error{Code: -32700, Message: "parse error"},
+			})
 			continue
 		}
 		if base.JSONRPC != "2.0" {
+			writeResponse(Response{
+				JSONRPC: "2.0",
+				ID:      base.ID,
+				Error:   &Error{Code: -32600, Message: "invalid request"},
+			})
 			continue
 		}
 
 		if base.ID == nil {
-			if base.Method == "initialized" {
+			switch base.Method {
+			case "initialized":
 				log.Println("MCP client initialized")
+			case "notifications/cancelled", "cancelled":
+				var params struct {
+					RequestID any `json:"requestId"`
+				}
+				if json.Unmarshal(base.Params, &params) == nil {
+					key := requestIDKey(params.RequestID)
+					pendingMu.Lock()
+					cancel := pending[key]
+					pendingMu.Unlock()
+					if cancel != nil {
+						cancel()
+					}
+				}
 			}
 			continue
 		}
 
-		var result any
-		var rpcErr *Error
-
-		switch base.Method {
-		case "initialize":
-			result = InitializeResult{
-				ProtocolVersion: protocolVersion,
-				Capabilities: ServerCapabilities{
-					Tools: &struct{}{},
-				},
-				ServerInfo: ServerInfo{
-					Name:    "conch-mcp",
-					Version: serverVersion,
-				},
-			}
-		case "tools/list":
-			result = s.buildToolsList()
-		case "tools/call":
-			result, rpcErr = s.handleToolsCall(ctx, base.Params)
+		select {
+		case requestSlots <- struct{}{}:
+		case <-ctx.Done():
+			break scanLoop
 		default:
-			rpcErr = &Error{Code: -32601, Message: fmt.Sprintf("unknown method: %s", base.Method)}
+			writeResponse(Response{
+				JSONRPC: "2.0",
+				ID:      base.ID,
+				Error:   &Error{Code: -32000, Message: "too many pending requests"},
+			})
+			continue
 		}
 
-		resp := Response{
-			JSONRPC: "2.0",
-			ID:      base.ID,
-			Result:  result,
-			Error:   rpcErr,
+		requestCtx, cancel := context.WithCancel(ctx)
+		requestKey := requestIDKey(base.ID)
+		pendingMu.Lock()
+		if pending[requestKey] != nil {
+			pendingMu.Unlock()
+			cancel()
+			<-requestSlots
+			writeResponse(Response{
+				JSONRPC: "2.0",
+				ID:      base.ID,
+				Error:   &Error{Code: -32600, Message: "duplicate request id"},
+			})
+			continue
 		}
-		if err := writeJSON(os.Stdout, resp); err != nil {
-			return fmt.Errorf("write response: %w", err)
-		}
+		pending[requestKey] = cancel
+		pendingMu.Unlock()
+
+		requestWG.Add(1)
+		go func(base struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      any             `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+		}) {
+			defer requestWG.Done()
+			defer func() { <-requestSlots }()
+			defer cancel()
+			defer func() {
+				pendingMu.Lock()
+				delete(pending, requestKey)
+				pendingMu.Unlock()
+			}()
+
+			select {
+			case concurrency <- struct{}{}:
+				defer func() { <-concurrency }()
+			case <-requestCtx.Done():
+				writeResponse(Response{
+					JSONRPC: "2.0",
+					ID:      base.ID,
+					Error:   &Error{Code: -32800, Message: "request cancelled"},
+				})
+				return
+			}
+
+			var result any
+			var rpcErr *Error
+			switch base.Method {
+			case "initialize":
+				result = InitializeResult{
+					ProtocolVersion: protocolVersion,
+					Capabilities:    ServerCapabilities{Tools: &struct{}{}},
+					ServerInfo: ServerInfo{
+						Name:    "conch-mcp",
+						Version: buildinfo.Version,
+					},
+				}
+			case "tools/list":
+				result = s.buildToolsList()
+			case "tools/call":
+				result, rpcErr = s.handleToolsCall(requestCtx, base.Params)
+			default:
+				rpcErr = &Error{
+					Code:    -32601,
+					Message: fmt.Sprintf("unknown method: %s", base.Method),
+				}
+			}
+			if requestCtx.Err() != nil {
+				result = nil
+				rpcErr = &Error{Code: -32800, Message: "request cancelled"}
+			}
+			writeResponse(Response{
+				JSONRPC: "2.0",
+				ID:      base.ID,
+				Result:  result,
+				Error:   rpcErr,
+			})
+		}(base)
 	}
-	return scanner.Err()
+
+	cancelAll()
+	requestWG.Wait()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	writeErrMu.Lock()
+	defer writeErrMu.Unlock()
+	return writeErr
+}
+
+func requestIDKey(id any) string {
+	data, err := json.Marshal(id)
+	if err != nil {
+		return fmt.Sprintf("%T:%v", id, id)
+	}
+	return string(data)
 }
 
 func (s *Server) buildToolsList() ToolsListResult {
@@ -249,6 +462,12 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 			return errorResult(errText), nil
 		}
 		return s.doShellExecute(ctx, transport, p.Arguments)
+	case "shell_start", "shell_jobs", "shell_job_get", "shell_job_stop", "shell_job_ack":
+		transport, errText := s.resolveDevice(p.Arguments)
+		if errText != "" {
+			return errorResult(errText), nil
+		}
+		return s.doShellJob(ctx, transport, p.Name, p.Arguments)
 	case "file_read":
 		transport, errText := s.resolveDevice(p.Arguments)
 		if errText != "" {
@@ -259,6 +478,14 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 		transport, errText := s.resolveDevice(p.Arguments)
 		if errText != "" {
 			return errorResult(errText), nil
+		}
+		// Image responses can each retain tens of MiB across encryption, JSON, and base64 layers.
+		// Bound them separately from ordinary request concurrency.
+		select {
+		case s.imageConcurrency <- struct{}{}:
+			defer func() { <-s.imageConcurrency }()
+		case <-ctx.Done():
+			return errorResult("view_image cancelled"), nil
 		}
 		return s.doViewImage(ctx, transport, p.Arguments)
 	case "file_write":
@@ -315,11 +542,15 @@ func (s *Server) resolveDevice(args map[string]interface{}) (*Transport, string)
 
 func (s *Server) doListDevices() ToolCallResult {
 	type DeviceInfo struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		URL         string `json:"url"`
-		Available   bool   `json:"available"`
-		Error       string `json:"error,omitempty"`
+		Name            string   `json:"name"`
+		Description     string   `json:"description"`
+		URL             string   `json:"url"`
+		Available       bool     `json:"available"`
+		Version         string   `json:"version,omitempty"`
+		Revision        string   `json:"revision,omitempty"`
+		ProtocolVersion string   `json:"protocol_version,omitempty"`
+		Capabilities    []string `json:"capabilities,omitempty"`
+		Error           string   `json:"error,omitempty"`
 	}
 	var devices []DeviceInfo
 	names := make([]string, 0, len(s.devices))
@@ -329,13 +560,27 @@ func (s *Server) doListDevices() ToolCallResult {
 	sort.Strings(names)
 	for _, name := range names {
 		cfg := s.devices[name]
-		_, available := s.transports[name]
+		transport, configured := s.transports[name]
+		available := false
+		errorText := s.unavailable[name]
+		var metadata buildinfo.Metadata
+		if configured {
+			available, errorText = transport.Status()
+			metadata = transport.Metadata()
+			if available {
+				errorText = ""
+			}
+		}
 		devices = append(devices, DeviceInfo{
-			Name:        name,
-			Description: cfg.Description,
-			URL:         cfg.URL,
-			Available:   available,
-			Error:       s.unavailable[name],
+			Name:            name,
+			Description:     cfg.Description,
+			URL:             cfg.URL,
+			Available:       available,
+			Version:         metadata.Version,
+			Revision:        metadata.Revision,
+			ProtocolVersion: metadata.ProtocolVersion,
+			Capabilities:    metadata.Capabilities,
+			Error:           errorText,
 		})
 	}
 	// Fallback: list transports if no device configs stored
@@ -346,7 +591,18 @@ func (s *Server) doListDevices() ToolCallResult {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			devices = append(devices, DeviceInfo{Name: name, Available: true})
+			transport := s.transports[name]
+			available, errorText := transport.Status()
+			metadata := transport.Metadata()
+			devices = append(devices, DeviceInfo{
+				Name:            name,
+				Available:       available,
+				Version:         metadata.Version,
+				Revision:        metadata.Revision,
+				ProtocolVersion: metadata.ProtocolVersion,
+				Capabilities:    metadata.Capabilities,
+				Error:           errorText,
+			})
 		}
 	}
 	data, _ := json.Marshal(devices)
@@ -373,30 +629,114 @@ func (s *Server) doShellExecute(ctx context.Context, t *Transport, args map[stri
 	return formatShellOutput(events), nil
 }
 
+func (s *Server) doShellJob(
+	ctx context.Context,
+	t *Transport,
+	toolName string,
+	args map[string]interface{},
+) (ToolCallResult, *Error) {
+	var result any
+	switch toolName {
+	case "shell_start":
+		command, _ := args["command"].(string)
+		if command == "" {
+			return errorResult("command is required"), nil
+		}
+		timeoutMs := 0
+		if value, ok := args["timeout_ms"].(float64); ok {
+			timeoutMs = int(value)
+		}
+		workdir, _ := args["workdir"].(string)
+		job, err := t.StartJob(ctx, command, timeoutMs, workdir)
+		if err != nil {
+			return errorResult(fmt.Sprintf("shell_start error: %v", err)), nil
+		}
+		result = job
+	case "shell_jobs":
+		jobs, err := t.ListJobs(ctx)
+		if err != nil {
+			return errorResult(fmt.Sprintf("shell_jobs error: %v", err)), nil
+		}
+		result = jobs
+	case "shell_job_get", "shell_job_stop", "shell_job_ack":
+		jobID, _ := args["job_id"].(string)
+		if jobID == "" {
+			return errorResult("job_id is required"), nil
+		}
+		switch toolName {
+		case "shell_job_get":
+			job, err := t.GetJob(ctx, jobID)
+			if err != nil {
+				return errorResult(fmt.Sprintf("shell_job_get error: %v", err)), nil
+			}
+			result = job
+		case "shell_job_stop":
+			job, err := t.StopJob(ctx, jobID)
+			if err != nil {
+				return errorResult(fmt.Sprintf("shell_job_stop error: %v", err)), nil
+			}
+			result = job
+		case "shell_job_ack":
+			ack, err := t.AcknowledgeJob(ctx, jobID)
+			if err != nil {
+				return errorResult(fmt.Sprintf("shell_job_ack error: %v", err)), nil
+			}
+			result = ack
+		}
+	default:
+		return errorResult("unknown shell job action"), nil
+	}
+
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return errorResult(fmt.Sprintf("encode shell job result: %v", err)), nil
+	}
+	return ToolCallResult{
+		Content:           []ContentItem{{Type: "text", Text: string(data)}},
+		StructuredContent: result,
+	}, nil
+}
+
 func formatShellOutput(events []LineEvent) ToolCallResult {
-	var text string
+	var output strings.Builder
 	hasError := false
+	timedOut := false
+	var exitCode *int
+	warnings := make([]string, 0)
 	for _, evt := range events {
 		switch {
+		case evt.Warning != "":
+			fmt.Fprintf(&output, "[warning] %s\n", evt.Warning)
+			warnings = append(warnings, evt.Warning)
 		case evt.Error != "":
-			text += fmt.Sprintf("[error] %s\n", evt.Error)
+			fmt.Fprintf(&output, "[error] %s\n", evt.Error)
 			hasError = true
+			timedOut = timedOut || evt.TimedOut
 		case evt.ExitCode != nil:
-			text += fmt.Sprintf("\nExit code: %d\n", *evt.ExitCode)
+			code := *evt.ExitCode
+			exitCode = &code
+			fmt.Fprintf(&output, "\nExit code: %d\n", code)
+		case evt.Stream == "stderr":
+			fmt.Fprintf(&output, "[stderr] %s\n", evt.Line)
 		default:
-			if evt.Stream == "stderr" {
-				text += fmt.Sprintf("[stderr] %s\n", evt.Line)
-			} else {
-				text += fmt.Sprintf("%s\n", evt.Line)
-			}
+			fmt.Fprintf(&output, "%s\n", evt.Line)
 		}
 	}
+	text := output.String()
 	if text == "" {
 		text = "(no output)"
 	}
+	structured := map[string]any{
+		"timed_out": timedOut,
+		"warnings":  warnings,
+	}
+	if exitCode != nil {
+		structured["exit_code"] = *exitCode
+	}
 	return ToolCallResult{
-		Content: []ContentItem{{Type: "text", Text: text}},
-		IsError: hasError,
+		Content:           []ContentItem{{Type: "text", Text: text}},
+		StructuredContent: structured,
+		IsError:           hasError,
 	}
 }
 
@@ -419,7 +759,27 @@ func (s *Server) doFileRead(ctx context.Context, t *Transport, args map[string]i
 	if err != nil {
 		return errorResult(fmt.Sprintf("file_read error: %v", err)), nil
 	}
-	return textResult(result.Content), nil
+	content := []ContentItem{{Type: "text", Text: result.Content}}
+	if result.Truncated {
+		content = append(content, ContentItem{
+			Type: "text",
+			Text: fmt.Sprintf(
+				"Warning: file_read returned a partial range (offset %d, size %d bytes)",
+				offset,
+				result.Size,
+			),
+		})
+	}
+	return ToolCallResult{
+		Content: content,
+		StructuredContent: map[string]any{
+			"offset":      offset,
+			"size":        result.Size,
+			"lines":       result.Lines,
+			"total_lines": result.TotalLines,
+			"truncated":   result.Truncated,
+		},
+	}, nil
 }
 
 // --- view_image ---
@@ -446,13 +806,15 @@ func (s *Server) doViewImage(ctx context.Context, t *Transport, args map[string]
 func (s *Server) doFileWrite(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
 	path, _ := args["path"].(string)
 	content, _ := args["content"].(string)
+	expectedSHA256, _ := args["expected_sha256"].(string)
 	if path == "" {
 		return errorResult("path is required"), nil
 	}
-	if err := t.FileWrite(ctx, path, content); err != nil {
+	result, err := t.FileWriteCAS(ctx, path, content, expectedSHA256)
+	if err != nil {
 		return errorResult(fmt.Sprintf("file_write error: %v", err)), nil
 	}
-	return textResult("file written successfully"), nil
+	return textResult(fmt.Sprintf("file written successfully (sha256 %s)", result.SHA256)), nil
 }
 
 // --- file_edit ---
@@ -462,6 +824,7 @@ func (s *Server) doFileEdit(ctx context.Context, t *Transport, args map[string]i
 	oldStr, _ := args["old_string"].(string)
 	newStr, _ := args["new_string"].(string)
 	replaceAll, _ := args["replace_all"].(bool)
+	expectedSHA256, _ := args["expected_sha256"].(string)
 
 	if path == "" {
 		return errorResult("path is required"), nil
@@ -470,30 +833,18 @@ func (s *Server) doFileEdit(ctx context.Context, t *Transport, args map[string]i
 		return errorResult("old_string is required"), nil
 	}
 
-	// Read the file
-	result, err := t.FileRead(ctx, path, 0, 0)
+	result, err := t.FileEdit(ctx, path, oldStr, newStr, replaceAll, expectedSHA256)
 	if err != nil {
-		return errorResult(fmt.Sprintf("file_edit read error: %v", err)), nil
+		return errorResult(fmt.Sprintf("file_edit error: %v", err)), nil
 	}
-
-	content := result.Content
-	count := strings.Count(content, oldStr)
-	if count == 0 {
-		return errorResult("old_string not found in file"), nil
-	}
-	if count > 1 && !replaceAll {
-		return errorResult(fmt.Sprintf("Found %d matches of old_string. Use replace_all=true to replace all, or provide more context to make it unique.", count)), nil
-	}
-
-	replaced := strings.ReplaceAll(content, oldStr, newStr)
-	if err := t.FileWrite(ctx, path, replaced); err != nil {
-		return errorResult(fmt.Sprintf("file_edit write error: %v", err)), nil
-	}
-
 	if replaceAll {
-		return textResult(fmt.Sprintf("Replaced %d occurrences", count)), nil
+		return textResult(fmt.Sprintf(
+			"Replaced %d occurrences (sha256 %s)",
+			result.Replacements,
+			result.SHA256,
+		)), nil
 	}
-	return textResult("replaced 1 occurrence"), nil
+	return textResult(fmt.Sprintf("replaced 1 occurrence (sha256 %s)", result.SHA256)), nil
 }
 
 // --- file_glob ---
@@ -505,14 +856,28 @@ func (s *Server) doFileGlob(ctx context.Context, t *Transport, args map[string]i
 		return errorResult("pattern is required"), nil
 	}
 
-	files, err := t.FileGlob(ctx, pattern, basePath)
+	files, truncated, err := t.FileGlob(ctx, pattern, basePath)
 	if err != nil {
 		return errorResult(fmt.Sprintf("file_glob error: %v", err)), nil
 	}
-	if len(files) == 0 {
-		return textResult("(no matches)"), nil
+	text := "(no matches)"
+	if len(files) > 0 {
+		text = strings.Join(files, "\n")
 	}
-	return textResult(strings.Join(files, "\n")), nil
+	content := []ContentItem{{Type: "text", Text: text}}
+	if truncated {
+		content = append(content, ContentItem{
+			Type: "text",
+			Text: "Warning: file_glob results were truncated at 1000 paths",
+		})
+	}
+	return ToolCallResult{
+		Content: content,
+		StructuredContent: map[string]any{
+			"count":     len(files),
+			"truncated": truncated,
+		},
+	}, nil
 }
 
 // --- file_grep ---
@@ -525,19 +890,32 @@ func (s *Server) doFileGrep(ctx context.Context, t *Transport, args map[string]i
 		return errorResult("pattern is required"), nil
 	}
 
-	matches, err := t.FileGrep(ctx, pattern, basePath, fileGlob)
+	matches, truncated, err := t.FileGrep(ctx, pattern, basePath, fileGlob)
 	if err != nil {
 		return errorResult(fmt.Sprintf("file_grep error: %v", err)), nil
 	}
-	if len(matches) == 0 {
-		return textResult("(no matches)"), nil
+	text := "(no matches)"
+	if len(matches) > 0 {
+		var sb strings.Builder
+		for _, m := range matches {
+			sb.WriteString(fmt.Sprintf("%s:%d: %s\n", m.Path, m.Line, m.Content))
+		}
+		text = strings.TrimSpace(sb.String())
 	}
-
-	var sb strings.Builder
-	for _, m := range matches {
-		sb.WriteString(fmt.Sprintf("%s:%d: %s\n", m.Path, m.Line, m.Content))
+	content := []ContentItem{{Type: "text", Text: text}}
+	if truncated {
+		content = append(content, ContentItem{
+			Type: "text",
+			Text: "Warning: file_grep results were truncated at 500 matches",
+		})
 	}
-	return textResult(strings.TrimSpace(sb.String())), nil
+	return ToolCallResult{
+		Content: content,
+		StructuredContent: map[string]any{
+			"count":     len(matches),
+			"truncated": truncated,
+		},
+	}, nil
 }
 
 // --- helpers ---

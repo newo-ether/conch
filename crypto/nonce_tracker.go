@@ -30,7 +30,7 @@ func (nt *NonceTracker) CheckAndRecord(timestamp int64, nonce string) bool {
 	defer nt.mu.Unlock()
 
 	now := time.Now().Unix()
-	if abs(now-timestamp) > windowSeconds {
+	if timestamp < now-windowSeconds || timestamp > now+windowSeconds {
 		return false
 	}
 
@@ -57,11 +57,4 @@ func (nt *NonceTracker) CheckAndRecord(timestamp int64, nonce string) bool {
 	}
 	bucket.seen[nonce] = struct{}{}
 	return true
-}
-
-func abs(x int64) int64 {
-	if x < 0 {
-		return -x
-	}
-	return x
 }

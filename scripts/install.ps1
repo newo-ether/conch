@@ -65,13 +65,18 @@
 
 param(
     [string]$ApiKey        = "",
+    [ValidateRange(1, 65535)]
     [int]   $Port          = 14216,
     [string]$HostAddr      = "0.0.0.0",
+    [ValidateRange(1, 604800)]
     [int]   $TimeoutSec    = 30,
+    [ValidateRange(1, 604800)]
     [int]   $MaxTimeoutSec = 120,
     [switch]$NoAuth        = $false,
     [string]$BinaryPath    = "",
     [string]$McpBinaryPath = "",
+    [ValidatePattern('^(latest|v[0-9]+\.[0-9]+\.[0-9]+)$')]
+    [string]$Version       = "latest",
     [string]$Prefix        = "",
     [switch]$NoStart       = $false,
     [switch]$Yes           = $false,
@@ -84,6 +89,18 @@ try {
 
 $ErrorActionPreference = "Stop"
 $Host.UI.RawUI.WindowTitle = "Conch Installer"
+
+if ($TimeoutSec -gt $MaxTimeoutSec) {
+    throw "TimeoutSec must not exceed MaxTimeoutSec"
+}
+if ([string]::IsNullOrWhiteSpace($HostAddr)) {
+    throw "HostAddr must not be empty"
+}
+foreach ($configValue in @($ApiKey, $HostAddr)) {
+    if ($configValue -match "[\r\n]") {
+        throw "Configuration values must not contain newlines"
+    }
+}
 
 # ============================================================================
 # Robustness: retry helper, trap, rollback state
@@ -265,30 +282,9 @@ function Install-Nssm {
         if ($found) { return $found }
     } catch { }
 
-    # B. Direct download from nssm.cc
-    Write-Info "winget unavailable, downloading nssm directly..."
-    $nssmZip = "$env:TEMP\nssm.zip"
-    $nssmDir = "$env:ProgramFiles\nssm"
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        (New-Object System.Net.WebClient).DownloadFile(
-            "https://nssm.cc/release/nssm-2.24.zip", $nssmZip)
-        Expand-Archive -Force $nssmZip -DestinationPath $nssmDir -ErrorAction Stop
-        Remove-Item $nssmZip -Force -ErrorAction SilentlyContinue
-        # nssm zip extracts to nssm-<ver>/win64/nssm.exe
-        $exe = Get-Item "$nssmDir\nssm-*\win64\nssm.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($exe) {
-            $env:Path = "$(Split-Path $exe.FullName);$env:Path"
-            [System.Environment]::SetEnvironmentVariable("Path",
-                "$(Split-Path $exe.FullName);$([System.Environment]::GetEnvironmentVariable('Path', 'Machine'))",
-                "Machine")
-            return (Get-Command $exe.FullName)
-        }
-    } catch {
-        Write-Warn "Direct download also failed: $($_.Exception.Message)"
-        if (Test-Path $nssmZip) { Remove-Item $nssmZip -Force -ErrorAction SilentlyContinue }
-    }
-
+    # Do not fall back to an unsigned direct archive. Installers must never execute a
+    # service wrapper that was not authenticated by the configured package manager.
+    Write-Warn "winget could not install NSSM; refusing an unverified direct download."
     return $null
 }
 
@@ -323,32 +319,26 @@ if (-not $Uninstall -and -not $BinaryPath) {
 }
 
 # --- Port conflict check ---
+# netstat is used directly because Get-NetTCPConnection can hang indefinitely while loading the
+# NetTCPIP provider on some Windows service hosts.
 if (-not $Uninstall) {
     $portInUse = $null
-    try {
-        $portInUse = Get-NetTCPConnection -LocalPort $Port -ErrorAction Stop |
-            Where-Object { $_.State -eq "Listen" }
-    } catch {
-        # Fallback for systems without NetTCPIP module (Server Core, older Windows)
-        $netstat = cmd /c "netstat -ano 2>nul" 2>$null
-        if ($netstat) {
-            $match = $netstat | Select-String ":$Port\s+.*LISTENING"
-            if ($match) {
-                $parts = $match -split '\s+'
-                $pid = $parts[-1]
-                $portInUse = [PSCustomObject]@{ OwningProcess = [int]$pid }
-            }
+    $netstat = cmd /c "netstat -ano -p tcp 2>nul" 2>$null
+    if ($netstat) {
+        $match = $netstat | Select-String ":$Port\s+.*LISTENING" | Select-Object -First 1
+        if ($match) {
+            $parts = ([string]$match) -split '\s+'
+            $ownerPid = $parts[-1]
+            $portInUse = [PSCustomObject]@{ OwningProcess = [int]$ownerPid }
         }
     }
     if ($portInUse) {
         $proc = Get-Process -Id $portInUse.OwningProcess -ErrorAction SilentlyContinue
         $procName = if ($proc) { $proc.ProcessName } else { "unknown" }
         Write-Warn "Port $Port is already in use by: $procName"
-        if (-not $Yes) {
-            if (-not (Prompt-User "Continue anyway?" -Default "Y")) {
-                Write-Info "Aborted. Choose a different port with -Port <number>"
-                return
-            }
+        if (-not $Yes -and -not (Prompt-User "Continue anyway?" -Default "Y")) {
+            Write-Info "Aborted. Choose a different port with -Port <number>"
+            return
         }
     } else {
         Write-OK "Port $Port available"
@@ -381,7 +371,12 @@ $RepoDir = if (Test-Path "$ScriptDir\go.mod") {
     $tmpDir
 }
 
-$GitHubReleases = "https://github.com/newo-ether/conch/releases/latest/download"
+$GitHubReleases = if ($Version -eq "latest") {
+    "https://github.com/newo-ether/conch/releases/latest/download"
+} else {
+    "https://github.com/newo-ether/conch/releases/download/$Version"
+}
+$ChecksumManifest = "$RepoDir\checksums-$Version.txt"
 
 # ============================================================================
 # Helper: stop and wait for a service
@@ -480,9 +475,21 @@ function Invoke-Nssm {
 # ============================================================================
 function Write-AtomicConfig {
     param([string]$Content, [string]$Target)
-    $tmp = "$Target.tmp"
-    $Content | Out-File -FilePath $tmp -Encoding ASCII -NoNewline
-    Move-Item -Force $tmp $Target -ErrorAction Stop
+    $swapID = [Guid]::NewGuid().ToString("N")
+    $tmp = "$Target.tmp.$swapID"
+    $backup = "$Target.swap-backup.$swapID"
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($tmp, $Content, $utf8)
+    try {
+        if (Test-Path -LiteralPath $Target) {
+            [IO.File]::Replace($tmp, $Target, $backup, $true)
+        } else {
+            Move-Item -LiteralPath $tmp -Destination $Target -ErrorAction Stop
+        }
+    } finally {
+        Remove-Item -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
+        Remove-Item -Force -LiteralPath $backup -ErrorAction SilentlyContinue
+    }
 }
 
 # ============================================================================
@@ -562,67 +569,69 @@ if ($Uninstall) {
 # ============================================================================
 # Step 2 - Detect & handle existing installation
 # ============================================================================
-
 $existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 $existingDir = Test-Path $InstallDir
+$ServiceWasRunning = [bool]($existingSvc -and $existingSvc.Status -eq "Running")
+$IsUpgrade = [bool]($existingSvc -or $existingDir)
 
-if ($existingSvc -or $existingDir) {
+if ($IsUpgrade) {
     Write-Step $Step $TotalSteps "Existing installation detected"
-
     if ($existingSvc) { Write-Warn "Service:  $ServiceName ($($existingSvc.Status))" }
     if ($existingDir) { Write-Warn "Location: $InstallDir" }
-
-    if (-not $Yes) {
-        Write-Host ""
-        $remove = Prompt-User "Remove existing installation before proceeding?" -Default "Y"
-    } else {
-        $remove = $true
-    }
-
-    if ($remove) {
-        Write-Info "Removing existing installation..."
-        if ($existingSvc) {
-            Stop-ServiceWait -Name $ServiceName
-            cmd /c "sc.exe delete `"$ServiceName`" >nul 2>&1"
-            cmd /c "nssm remove `"$ServiceName`" confirm >nul 2>&1"
-            Write-OK "Service removed"
-        }
-        Get-Process -Name "conch", "conch-mcp" -ErrorAction SilentlyContinue |
-            Stop-Process -Force -ErrorAction SilentlyContinue
-        if ($existingDir) {
-            Remove-Safe $InstallDir "install directory"
-            if (-not (Test-Path $InstallDir)) {
-                Write-OK "Directory removed: $InstallDir"
-            }
-        }
-    } else {
-        Write-Info "Keeping existing files. Proceeding with in-place update."
-    }
+    Write-Info "Performing an in-place upgrade; configuration and durable job state will be preserved."
 }
 
 $Step++
 
 # ============================================================================
+# ============================================================================
 # Step 3 - Acquire binary
 # ============================================================================
 Write-Step $Step $TotalSteps "Acquiring binaries..."
 
+function Download-Url {
+    param([string]$Url, [string]$Dest, [string]$Description)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Retry-Command -Script {
+        $client = New-Object System.Net.WebClient
+        try {
+            $client.Headers.Add("User-Agent", "Conch-Installer/$Version")
+            $client.DownloadFile($Url, $Dest)
+        } finally {
+            $client.Dispose()
+        }
+        if (-not (Test-Path $Dest)) { throw "Download completed but file not found" }
+    } -MaxAttempts 3 -DelaySeconds 3 -Description $Description
+}
+
+function Get-ExpectedReleaseHash {
+    param([string]$Name)
+    if (-not (Test-Path $ChecksumManifest)) {
+        Write-Info "Downloading signed-release checksum manifest..."
+        Download-Url "$GitHubReleases/checksums.txt" $ChecksumManifest "download checksums.txt"
+    }
+    $pattern = "^([A-Fa-f0-9]{64})\s+\*?$([Regex]::Escape($Name))$"
+    foreach ($line in Get-Content -LiteralPath $ChecksumManifest) {
+        if ($line -match $pattern) { return $Matches[1].ToLowerInvariant() }
+    }
+    throw "checksums.txt does not contain $Name"
+}
+
 function Download-File {
     param([string]$Name, [string]$Dest)
     $url = "$GitHubReleases/$Name"
-    Write-Info "Downloading $Name..."
+    Write-Info "Downloading $Name from release $Version..."
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $client = New-Object System.Net.WebClient
-        $client.Headers.Add("User-Agent", "Conch-Installer/1.0")
-        Retry-Command -Script {
-            $client.DownloadFile($url, $Dest)
-            if (-not (Test-Path $Dest)) { throw "Download completed but file not found" }
-        } -MaxAttempts 3 -DelaySeconds 3 -Description "download $Name"
-        Write-OK "Downloaded: $Name"
+        $expected = Get-ExpectedReleaseHash $Name
+        Download-Url $url $Dest "download $Name"
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Dest).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            throw "SHA-256 mismatch for $Name (expected $expected, got $actual)"
+        }
+        Write-OK "Verified SHA-256: $Name"
         return $true
     } catch {
-        Write-Warn "Download failed: $($_.Exception.Message.Split([Environment]::NewLine)[0])"
+        Write-Warn "Verified download failed: $($_.Exception.Message.Split([Environment]::NewLine)[0])"
         if (Test-Path $Dest) { Remove-Item $Dest -Force -ErrorAction SilentlyContinue }
         return $false
     }
@@ -728,12 +737,38 @@ if (-not $SrcMcp) {
     Write-Warn "conch-mcp not available - MCP bridge will not be installed"
 }
 
+function Assert-BinaryVersion {
+    param([string]$Path, [string]$Label)
+    $reported = & $Path --version 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($reported)) {
+        throw "$Label did not return version metadata"
+    }
+    if ($Version -ne "latest" -and $reported -notmatch [Regex]::Escape($Version)) {
+        throw "$Label reports '$($reported.Trim())', requested $Version"
+    }
+    Write-OK "$Label version: $($reported.Trim())"
+}
+Assert-BinaryVersion $SrcBin "conch"
+if ($SrcMcp) { Assert-BinaryVersion $SrcMcp "conch-mcp" }
+
 $Step++
 
 # ============================================================================
 # Step 4 - Install files
 # ============================================================================
 Write-Step $Step $TotalSteps "Installing files..."
+
+# Delay the first upgrade side effect until release binaries have been acquired and verified.
+if ($existingSvc) {
+    Push-Rollback {
+        if ($ServiceWasRunning) {
+            Start-ServiceWait -Name $ServiceName -TimeoutSec 15 | Out-Null
+        }
+    } "Restore previous service running state"
+    if (-not (Stop-ServiceWait -Name $ServiceName)) {
+        throw "Service '$ServiceName' did not stop cleanly; refusing to replace its binary."
+    }
+}
 
 # Create install directory with rollback registration
 if (-not (Test-Path $InstallDir)) {
@@ -755,14 +790,58 @@ function Copy-IfDifferent {
         Write-OK "$Label already in place (same file)"
         return
     }
-    # Stop any running process using the destination
-    $destName = [IO.Path]::GetFileNameWithoutExtension($Dest)
-    Get-Process -Name $destName -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
-    Retry-Command -Script {
-        Copy-Item -Force $Source $Dest -ErrorAction Stop
-    } -MaxAttempts 3 -DelaySeconds 1 -Description "copying $Label"
+
+    # Stage first, then swap paths. A running MCP executable can keep using its
+    # renamed image while new invocations immediately resolve to the new binary.
+    $swapID = [Guid]::NewGuid().ToString("N")
+    $staged = "$Dest.new.$swapID"
+    $retired = "$Dest.retired.$swapID"
+    Copy-Item -Force -LiteralPath $Source -Destination $staged -ErrorAction Stop
+    try {
+        if (Test-Path $Dest) {
+            Move-Item -Force -LiteralPath $Dest -Destination $retired -ErrorAction Stop
+        }
+        Move-Item -Force -LiteralPath $staged -Destination $Dest -ErrorAction Stop
+    } catch {
+        if (-not (Test-Path $Dest) -and (Test-Path $retired)) {
+            Move-Item -Force -LiteralPath $retired -Destination $Dest -ErrorAction SilentlyContinue
+        }
+        throw
+    } finally {
+        Remove-Item -Force -LiteralPath $staged -ErrorAction SilentlyContinue
+        Remove-Item -Force -LiteralPath $retired -ErrorAction SilentlyContinue
+    }
     Write-OK "$Label installed"
+}
+
+$ServerBackup = "$BinPath.previous"
+$McpBackup = "$McpBinPath.previous"
+if (Test-Path $BinPath) {
+    Copy-Item -Force -LiteralPath $BinPath -Destination $ServerBackup
+    Push-Rollback {
+        if (Test-Path $ServerBackup) {
+            Stop-ServiceWait -Name $ServiceName | Out-Null
+            Copy-Item -Force -LiteralPath $ServerBackup -Destination $BinPath
+            if ($existingSvc) {
+                $rollbackNssm = Get-Command nssm -ErrorAction SilentlyContinue
+                if ($rollbackNssm -and (Test-Path $EnvFile)) {
+                    $rollbackEnv = @(
+                        Get-Content -LiteralPath $EnvFile |
+                            Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' }
+                    )
+                    Invoke-Nssm -Path $rollbackNssm.Source -Arguments (@("set", $ServiceName, "AppEnvironmentExtra") + $rollbackEnv) -AllowFailure
+                }
+            }
+        }
+    } "Restore previous conch.exe and service registration"
+}
+if (Test-Path $McpBinPath) {
+    Copy-Item -Force -LiteralPath $McpBinPath -Destination $McpBackup
+    Push-Rollback {
+        if (Test-Path $McpBackup) {
+            Copy-Item -Force -LiteralPath $McpBackup -Destination $McpBinPath
+        }
+    } "Restore previous conch-mcp.exe"
 }
 
 Copy-IfDifferent $SrcBin $BinPath "conch.exe"
@@ -777,36 +856,88 @@ $Step++
 # ============================================================================
 Write-Step $Step $TotalSteps "Configuring..."
 
-# API Key
-if (-not $ApiKey) {
-    if (Test-Path $EnvFile) {
-        $existing = Get-Content $EnvFile -Raw -ErrorAction SilentlyContinue
-        if ($existing -match "CONCH_API_KEY=(\S+)") {
-            $ApiKey = $Matches[1].Trim()
-            Write-OK "Reusing API key from existing env.txt"
+# Preserve every existing setting by default; only explicitly supplied parameters are changed.
+function Set-EnvValue {
+    param(
+        [System.Collections.Generic.List[string]]$Lines,
+        [string]$Name,
+        [string]$Value
+    )
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match "^$([Regex]::Escape($Name))=") {
+            $Lines[$i] = "$Name=$Value"
+            return
         }
     }
-    if (-not $ApiKey) {
-        $bytes = New-Object byte[] 32
-        (New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
-        $ApiKey = [Convert]::ToBase64String($bytes).TrimEnd('=')
-        Write-OK "Generated new API key"
-    }
+    $Lines.Add("$Name=$Value")
 }
 
-$configContent = @"
-CONCH_API_KEY=$ApiKey
-CONCH_PORT=$Port
-CONCH_HOST=$HostAddr
-CONCH_TIMEOUT=$TimeoutSec
-CONCH_MAX_TIMEOUT=$MaxTimeoutSec
-CONCH_ALLOW_NO_AUTH=$($NoAuth.ToString().ToLower())
-"@
+$EnvBackup = "$EnvFile.previous"
+if (Test-Path $EnvFile) {
+    Copy-Item -Force -LiteralPath $EnvFile -Destination $EnvBackup
+    Push-Rollback {
+        Copy-Item -Force -LiteralPath $EnvBackup -Destination $EnvFile -ErrorAction SilentlyContinue
+    } "Restore previous configuration"
+} else {
+    Push-Rollback {
+        Remove-Item -Force -LiteralPath $EnvFile -ErrorAction SilentlyContinue
+    } "Remove newly created configuration"
+}
 
+$configLines = [System.Collections.Generic.List[string]]::new()
+if (Test-Path $EnvFile) {
+    foreach ($line in Get-Content -LiteralPath $EnvFile) { $configLines.Add($line) }
+    Write-OK "Preserving existing configuration and durable job settings"
+} else {
+    $configLines.Add("CONCH_PORT=$Port")
+    $configLines.Add("CONCH_HOST=$HostAddr")
+    $configLines.Add("CONCH_TIMEOUT=$TimeoutSec")
+    $configLines.Add("CONCH_MAX_TIMEOUT=$MaxTimeoutSec")
+    $configLines.Add("CONCH_ALLOW_NO_AUTH=$($NoAuth.ToString().ToLowerInvariant())")
+}
+
+if ($PSBoundParameters.ContainsKey("Port")) {
+    Set-EnvValue $configLines "CONCH_PORT" $Port
+}
+if ($PSBoundParameters.ContainsKey("HostAddr")) {
+    Set-EnvValue $configLines "CONCH_HOST" $HostAddr
+}
+if ($PSBoundParameters.ContainsKey("TimeoutSec")) {
+    Set-EnvValue $configLines "CONCH_TIMEOUT" $TimeoutSec
+}
+if ($PSBoundParameters.ContainsKey("MaxTimeoutSec")) {
+    Set-EnvValue $configLines "CONCH_MAX_TIMEOUT" $MaxTimeoutSec
+}
+if ($PSBoundParameters.ContainsKey("NoAuth")) {
+    Set-EnvValue $configLines "CONCH_ALLOW_NO_AUTH" $NoAuth.ToString().ToLowerInvariant()
+}
+
+if (-not $ApiKey) {
+    foreach ($line in $configLines) {
+        if ($line -match "^CONCH_API_KEY=(.+)$") {
+            $ApiKey = $Matches[1].Trim()
+            break
+        }
+    }
+}
+if (-not $ApiKey) {
+    $bytes = New-Object byte[] 32
+    (New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
+    $ApiKey = [Convert]::ToBase64String($bytes).TrimEnd("=")
+    Write-OK "Generated new API key"
+}
+if ($PSBoundParameters.ContainsKey("ApiKey") -or -not ($configLines -match "^CONCH_API_KEY=")) {
+    Set-EnvValue $configLines "CONCH_API_KEY" $ApiKey
+}
+
+$configContent = [string]::Join([Environment]::NewLine, $configLines)
 Write-AtomicConfig $configContent $EnvFile
-Write-OK "Config written: $EnvFile"
-Write-Info "API key: $ApiKey"
+Write-OK "Config written atomically: $EnvFile"
 
+foreach ($line in $configLines) {
+    if ($line -match "^CONCH_PORT=(\d+)$") { $Port = [int]$Matches[1] }
+    if ($line -eq "CONCH_ALLOW_NO_AUTH=true") { $NoAuth = $true }
+}
 if ($NoAuth) {
     Write-Warn "Authentication is DISABLED - do not expose to untrusted networks!"
 }
@@ -828,34 +959,19 @@ if (-not $nssm) {
 Write-OK "nssm ready: $($nssm.Source)"
 $nssmExe = $nssm.Source
 
-# Clean up any leftover service registration
+# Update an existing service in place so a later failure can retain its registration.
 $existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existingSvc) {
-    Write-Info "Removing stale service registration..."
-    Stop-ServiceWait -Name $ServiceName
-    cmd /c "sc.exe delete `"$ServiceName`" >nul 2>&1"
-    Invoke-Nssm -Path $nssmExe -Arguments @("remove", $ServiceName, "confirm") -AllowFailure
-    Start-Sleep -Seconds 2
-    # Verify removal
-    $stillThere = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($stillThere) {
-        Write-Warn "Failed to remove existing service. Trying force removal..."
-        cmd /c "sc.exe delete `"$ServiceName`" >nul 2>&1"
-        Start-Sleep -Seconds 3
-        $stillThere = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($stillThere) {
-            Write-ErrorExit "Cannot remove existing service '$ServiceName'.`n  Please remove it manually (sc.exe delete $ServiceName) or reboot and retry."
-        }
-    }
+    Write-Info "Updating existing service registration in place..."
+    Stop-ServiceWait -Name $ServiceName | Out-Null
+    Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "Application", $BinPath)
+} else {
+    Write-Info "Creating service..."
+    Invoke-Nssm -Path $nssmExe -Arguments @("install", $ServiceName, $BinPath)
+    Push-Rollback {
+        Invoke-Nssm -Path $nssmExe -Arguments @("remove", $ServiceName, "confirm") -AllowFailure
+    } "Remove created service: $ServiceName"
 }
-
-# Register with nssm
-Write-Info "Creating service..."
-
-Invoke-Nssm -Path $nssmExe -Arguments @("install", $ServiceName, $BinPath)
-Push-Rollback {
-    Invoke-Nssm -Path $nssmExe -Arguments @("remove", $ServiceName, "confirm") -AllowFailure
-} "Remove created service: $ServiceName"
 
 Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "AppDirectory", $InstallDir)
 Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "Start", "SERVICE_AUTO_START")
@@ -866,7 +982,10 @@ Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "DisplayName", "Con
 Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "AppExit", "Default", "Restart")
 
 # Environment variables
-$envLines = @(Get-Content $EnvFile)
+$envLines = @(
+    Get-Content -LiteralPath $EnvFile |
+        Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' }
+)
 $environmentArguments = @("set", $ServiceName, "AppEnvironmentExtra") + $envLines
 Invoke-Nssm -Path $nssmExe -Arguments $environmentArguments
 
@@ -889,11 +1008,15 @@ if ($DoStart) {
         try {
             Start-Sleep -Seconds 1
             $health = Invoke-RestMethod -Uri "http://localhost:$Port/health" -TimeoutSec 5 -ErrorAction SilentlyContinue
-            if ($health) {
-                Write-OK "Health check passed: localhost:$Port/health"
+            if (-not $health -or $health.status -ne "ok" -or -not $health.version) {
+                throw "health response is missing status/version"
             }
+            if ($Version -ne "latest" -and $health.version -ne $Version) {
+                throw "installed version $($health.version) does not match requested $Version"
+            }
+            Write-OK "Health/version check passed: $($health.version)"
         } catch {
-            Write-Warn "Health check failed - service may still be initializing"
+            Write-ErrorExit "Health/version verification failed: $($_.Exception.Message)"
         }
     } else {
         Write-ErrorExit "Service '$ServiceName' did not reach Running state within 15 seconds."
@@ -913,7 +1036,7 @@ Write-Host ("  |  ${Bold}{0}${Reset}{1}|" -f $t, (' ' * ($boxW - 2 - $t.Length))
 Write-Host "  +----------------------------------------------+" -ForegroundColor Green
 Write-Host ""
 Write-Host "  ${Cyan}Health check:${Reset}   curl.exe -s http://localhost:$Port/health"
-Write-Host "  ${Cyan}API key:${Reset}       $ApiKey"
+Write-Host "  ${Cyan}API key:${Reset}       stored in protected config (not printed)"
 Write-Host "  ${Cyan}Config file:${Reset}   $EnvFile"
 Write-Host ""
 Write-Host "  ${Cyan}Manage:${Reset}"
@@ -936,6 +1059,7 @@ Write-Host ""
     Write-Err "Installation failed. The system has been restored to its previous state."
     Write-Host "  For manual installation help: https://github.com/newo-ether/conch"
     Write-Host ""
+    throw
 }
 
 }

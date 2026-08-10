@@ -21,7 +21,7 @@ A lightweight, zero-dependency shell execution server with SSE streaming and end
 
 ### One-click (recommended)
 
-The script auto-detects your platform, downloads pre-built binaries from GitHub Releases, generates an API key, and registers a system service.
+The script auto-detects your platform, downloads pre-built binaries from GitHub Releases, verifies every download against `checksums.txt`, generates an API key for a new install, and registers a system service. Re-running it performs an in-place upgrade that preserves the API key, configuration, durable jobs, and rollback binaries; use `--version vX.Y.Z` / `-Version vX.Y.Z` to pin a release.
 
 **Linux:**
 ```bash
@@ -41,13 +41,13 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercont
 Custom options:
 ```bash
 # Linux
-sudo ./scripts/install.sh --port 14216 --api-key "your-key"
+sudo ./scripts/install.sh --version v1.0.9 --port 14216 --api-key "your-key"
 
 # Termux
 ./scripts/install.sh --port 8080
 
 # Windows
-.\scripts\install.ps1 -Port 14216 -ApiKey "your-key"
+.\scripts\install.ps1 -Version v1.0.9 -Port 14216 -ApiKey "your-key"
 ```
 
 ### From source (manual)
@@ -105,26 +105,31 @@ curl -s http://localhost:14216/health
 | `CONCH_MAX_JOB_TIMEOUT_SECONDS` | `86400` | Maximum runtime of one background job |
 | `CONCH_MAX_JOB_OUTPUT_BYTES` | `262144` | Maximum rolling output retained per job |
 | `CONCH_MAX_JOBS` | `100` | Maximum retained job snapshots; running jobs are never evicted |
+| `CONCH_TRUSTED_PROXIES` | _(empty)_ | Comma-separated proxy IPs/CIDRs allowed to supply `X-Forwarded-For`; untrusted forwarding headers are ignored |
 
 ## Platform behavior
 
 | Platform | Shell | Service manager | Process control |
 |----------|-------|-----------------|-----------------|
-| Linux | `/bin/sh` | systemd | SIGTERM → SIGKILL escalation |
-| Termux | `$PREFIX/bin/sh` | runit | `proot` + signal fallback |
-| Windows | `cmd.exe /C` | nssm | Job objects |
+| Linux | `/bin/sh` | systemd | dedicated process-group kill |
+| Termux | `/bin/sh` | runit | dedicated process-group kill |
+| Windows | non-interactive PowerShell (UTF-8) | nssm | Job Object with process-tree fallback |
 
-On Termux, commands run in `/data/data/com.termux/files/home`. On Windows, `workdir` defaults to `%USERPROFILE%`.
+When `workdir` is omitted, the command inherits the service working directory; pass an explicit absolute directory when location matters.
 
 ## Protocol
 
 ### `GET /health`
 
-No auth. Returns `{"status":"ok"}`.
+No auth. Returns status plus build version, revision, and Conch protocol version.
+
+### `GET /version`
+
+No auth. Returns the binary name, version, revision, deterministic build time, protocol version, and negotiated capability list.
 
 ### `GET /public-key`
 
-Returns the server's persistent X25519 public key, signed with HMAC-SHA256(key, nonce|public_key) to prevent MITM substitution:
+Returns the server process's current X25519 public key, signed with HMAC-SHA256(key, nonce|public_key) to prevent MITM substitution. Clients refresh it only after an explicit pre-dispatch decryption rejection, so a restart cannot make MCP permanently stale:
 
 ```json
 {
@@ -188,11 +193,12 @@ Background jobs use the same authenticated and encrypted POST envelope as `/exec
 | Endpoint | Request body | Description |
 |----------|--------------|-------------|
 | `POST /jobs/start` | `{"command":"...","timeout_ms":600000,"workdir":"/tmp"}` | Start a durable job and return its `job_id` |
-| `POST /jobs/list` | `{}` | List retained jobs, newest first |
+| `POST /jobs/list` | `{}` | List retained job metadata, newest first; rolling output is omitted |
 | `POST /jobs/get` | `{"job_id":"..."}` | Return current state, rolling output, exit code, and truncation metadata |
 | `POST /jobs/stop` | `{"job_id":"..."}` | Cancel the job and its process tree |
+| `POST /jobs/ack` | `{"job_id":"..."}` | Idempotently delete a terminal job after the client durably stores its result; live jobs are rejected |
 
-Job states are `running`, `stopping`, `succeeded`, `failed`, `stopped`, and `interrupted`. A job that was active when Conch restarted is recovered as `interrupted`; Conch never reports an orphaned process as still running.
+Job states are `running`, `stopping`, `settling`, `succeeded`, `failed`, `stopped`, and `interrupted`. `settling` means the process has ended but its terminal snapshot is still retrying durable persistence and cannot yet be acknowledged. A job that was active when Conch restarted is recovered as `interrupted`; Conch never reports an orphaned process as still running.
 
 ### Protocol summary
 
@@ -212,7 +218,7 @@ Client                           Server
 
 ## MCP (Claude Desktop integration)
 
-The `conch-mcp` binary exposes a `shell_execute` tool to Claude Desktop via the Model Context Protocol.
+The `conch-mcp` binary exposes bounded synchronous shell execution, explicit durable job lifecycle tools, atomic file operations, and device discovery over stdio Model Context Protocol. Devices may be offline at MCP startup and reconnect lazily; concurrent requests and MCP cancellation notifications are supported.
 
 ### Multi-device configuration
 
@@ -253,8 +259,10 @@ The `conch-mcp` binary exposes a `shell_execute` tool to Claude Desktop via the 
 |-----------|------|----------|---------|-------------|
 | `device` | string | yes* | — | Target device name (required when managing multiple devices) |
 | `command` | string | yes | — | Shell command to execute |
-| `timeout_ms` | integer | no | 30000 | Timeout in milliseconds (max 120000) |
+| `timeout_ms` | integer | no | 30000 | Timeout in milliseconds (bounded by the server's configured maximum) |
 | `workdir` | string | no | — | Working directory |
+
+Durable execution uses `shell_start`, `shell_jobs`, `shell_job_get`, `shell_job_stop`, and `shell_job_ack`; it is never entered by silently retrying a timed-out synchronous command. File tools are `file_read`, `view_image`, `file_write`, `file_edit`, `file_glob`, and `file_grep`. `file_edit` executes atomically on the target and optionally accepts `expected_sha256`.
 
 ## License
 
