@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -121,24 +122,38 @@ func (e *Executor) ExecuteWithMaxTimeout(
 			cmd.Dir = req.Workdir
 		}
 
-		stdout, err := cmd.StdoutPipe()
+		stdoutReader, stdoutWriter, err := os.Pipe()
 		if err != nil {
 			log.Printf("ERROR: failed to create stdout pipe: %v", err)
 			ch <- LineEvent{Error: "internal error"}
 			return
 		}
-		stderr, err := cmd.StderrPipe()
+		stderrReader, stderrWriter, err := os.Pipe()
 		if err != nil {
+			_ = stdoutReader.Close()
+			_ = stdoutWriter.Close()
 			log.Printf("ERROR: failed to create stderr pipe: %v", err)
 			ch <- LineEvent{Error: "internal error"}
 			return
 		}
 
+		cmd.Stdout = stdoutWriter
+		cmd.Stderr = stderrWriter
+
 		if err := cmd.Start(); err != nil {
+			_ = stdoutReader.Close()
+			_ = stdoutWriter.Close()
+			_ = stderrReader.Close()
+			_ = stderrWriter.Close()
 			log.Printf("ERROR: failed to start command: %v", err)
 			ch <- LineEvent{Error: "internal error"}
 			return
 		}
+
+		// Start duplicates the write handles into the child. Drop the parent's copies so ordinary
+		// completion produces EOF while Conch retains control of the local read handles.
+		_ = stdoutWriter.Close()
+		_ = stderrWriter.Close()
 
 		// Bind descendants to an operating-system process-tree controller. Windows uses a Job
 		// Object with KILL_ON_JOB_CLOSE; Unix uses a dedicated process group. If Windows cannot
@@ -163,12 +178,25 @@ func (e *Executor) ExecuteWithMaxTimeout(
 
 		var wg sync.WaitGroup
 		wg.Add(2)
-		scanStream(&wg, ch, stdout, "stdout")
-		scanStream(&wg, ch, stderr, "stderr")
+		scanStream(&wg, ch, stdoutReader, "stdout")
+		scanStream(&wg, ch, stderrReader, "stderr")
 
-		wg.Wait()
 		waitErr := cmd.Wait()
 		close(processDone)
+		// Preserve a bounded tail-drain opportunity after the root exits. A detached descendant may
+		// keep inherited writers open indefinitely, so close only Conch's readers after the bound.
+		drained := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+		case <-time.After(500 * time.Millisecond):
+			_ = stdoutReader.Close()
+			_ = stderrReader.Close()
+			<-drained
+		}
 
 		if execCtx.Err() == context.DeadlineExceeded {
 			ch <- LineEvent{Error: "command timed out", TimedOut: true}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,6 +37,30 @@ func TestJobManagerPersistsCompletedOutput(t *testing.T) {
 	}
 	if persisted.State != JobStateSucceeded || persisted.Output == "" {
 		t.Fatalf("persisted job = %#v", persisted)
+	}
+}
+
+func TestJobManagerSettlesWhenDescendantRetainsOutputHandles(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows handle inheritance regression")
+	}
+	manager := newTestJobManager(t, t.TempDir())
+	job, err := manager.Start(Request{
+		Command: "$child = [Diagnostics.ProcessStartInfo]::new('powershell', " +
+			"'-NoProfile -Command Start-Sleep -Seconds 5'); " +
+			"$child.UseShellExecute = $false; [Diagnostics.Process]::Start($child) | Out-Null; " +
+			"Write-Output 'PARENT_DONE'",
+		TimeoutMs: 10_000,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	finished := waitForTerminalJob(t, manager, job.JobID)
+	if finished.State != JobStateSucceeded || finished.ExitCode == nil || *finished.ExitCode != 0 {
+		t.Fatalf("terminal job = %#v", finished)
+	}
+	if finished.FinishedAt == nil || !strings.Contains(finished.Output, "PARENT_DONE") {
+		t.Fatalf("terminal metadata/output incomplete: %#v", finished)
 	}
 }
 

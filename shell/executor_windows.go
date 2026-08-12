@@ -4,6 +4,8 @@ package shell
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -30,24 +32,40 @@ const (
 )
 
 func newShellCommand(ctx context.Context, command string) *exec.Cmd {
+	// Windows PowerShell 5.1 treats `-Command -` as an interactive stdin session: a complete legal
+	// here-string can reach EOF without execution and syntax errors can become exit-0 empty output.
+	// Keep only this fixed bootstrap on the command line. It reads the complete caller source as
+	// UTF-8, parses it once, and invokes it. Source therefore retains the public 64 KiB bound without
+	// exceeding Windows' ~32K UTF-16 command-line limit or being persisted in a temporary file.
+	const bootstrap = "$ProgressPreference = 'SilentlyContinue'\n" +
+		"[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)\n" +
+		"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n" +
+		"$OutputEncoding = [Console]::OutputEncoding\n" +
+		"$reader = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new($false), $true)\n" +
+		"try { $source = $reader.ReadToEnd() } finally { $reader.Dispose() }\n" +
+		"$script = [ScriptBlock]::Create($source)\n" +
+		"& $script\n" +
+		"if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\n"
 	cmd := exec.CommandContext(
 		ctx,
 		"powershell",
 		"-NoLogo",
 		"-NoProfile",
 		"-NonInteractive",
-		"-Command",
-		"-",
+		"-EncodedCommand",
+		encodePowerShellCommand(bootstrap),
 	)
-	// Windows PowerShell inherits the service's console code pages. On Chinese Windows that can
-	// make both the command stream and redirected output CP936/GBK, which is then irreversibly
-	// replaced by encoding/json. Execute an ASCII preamble before the caller's command so all
-	// subsequent PowerShell and native-process pipe traffic uses UTF-8.
-	const utf8Preamble = "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)\n" +
-		"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n" +
-		"$OutputEncoding = [Console]::OutputEncoding\n"
-	cmd.Stdin = strings.NewReader(utf8Preamble + command)
+	cmd.Stdin = strings.NewReader(command)
 	return cmd
+}
+
+func encodePowerShellCommand(command string) string {
+	units := utf16.Encode([]rune(command))
+	bytes := make([]byte, len(units)*2)
+	for i, unit := range units {
+		binary.LittleEndian.PutUint16(bytes[i*2:], unit)
+	}
+	return base64.StdEncoding.EncodeToString(bytes)
 }
 
 func decodeShellOutputLine(line []byte) string {
