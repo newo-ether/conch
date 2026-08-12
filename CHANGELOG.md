@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.11] - 2026-08-12
+
+### Fixed
+
+- Suppressed the false `file already closed` stream warning produced when Conch intentionally closes its owned pipe reader after the bounded detached-descendant drain window.
+- Kept genuine non-EOF stream read failures visible while preserving output, exit codes, durable terminal state, and detached-process completion behavior.
+
+### Verification
+
+- Added Executor and durable JobManager regressions requiring bounded drain closure to complete silently.
+- Repeated the retained-handle, terminal settlement, and high-volume tail-output contracts, then passed the complete test, vet, and PowerShell 5 installer gates.
+
 ## [1.0.10] - 2026-08-12
 
 ### Fixed
@@ -21,5 +33,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.10...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.11...HEAD
+[1.0.11]: https://github.com/newo-ether/conch/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/newo-ether/conch/compare/v1.0.9...v1.0.10
