@@ -99,6 +99,7 @@ func TestExecutorFinishesWhenDetachedDescendantRetainsOutputHandles(t *testing.T
 	deadline := time.NewTimer(2 * time.Second)
 	defer deadline.Stop()
 	var lines []string
+	var warnings []string
 	var exitCode *int
 	for {
 		select {
@@ -110,10 +111,16 @@ func TestExecutorFinishesWhenDetachedDescendantRetainsOutputHandles(t *testing.T
 				if exitCode == nil || *exitCode != 0 {
 					t.Fatalf("exit code = %v", exitCode)
 				}
+				if len(warnings) != 0 {
+					t.Fatalf("expected local bounded drain closure to be silent, warnings = %q", warnings)
+				}
 				return
 			}
 			if event.Line != "" {
 				lines = append(lines, event.Line)
+			}
+			if event.Warning != "" {
+				warnings = append(warnings, event.Warning)
 			}
 			if event.ExitCode != nil {
 				code := *event.ExitCode

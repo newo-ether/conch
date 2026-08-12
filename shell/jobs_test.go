@@ -62,6 +62,9 @@ func TestJobManagerSettlesWhenDescendantRetainsOutputHandles(t *testing.T) {
 	if finished.FinishedAt == nil || !strings.Contains(finished.Output, "PARENT_DONE") {
 		t.Fatalf("terminal metadata/output incomplete: %#v", finished)
 	}
+	if finished.Warning != "" {
+		t.Fatalf("expected local bounded drain closure to be silent, warning = %q", finished.Warning)
+	}
 }
 
 func TestJobManagerStopCancelsProcessTree(t *testing.T) {

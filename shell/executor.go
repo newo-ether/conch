@@ -253,7 +253,9 @@ func scanStream(wg *sync.WaitGroup, ch chan<- LineEvent, r io.Reader, stream str
 				discarding = false
 			}
 			if err != nil {
-				if !errors.Is(err, io.EOF) {
+				// Closing Conch's owned read handle is expected after a detached descendant keeps an
+				// inherited writer open beyond the bounded drain window.
+				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {
 					ch <- LineEvent{Warning: stream + " read error: " + err.Error()}
 				}
 				return
