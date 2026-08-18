@@ -692,30 +692,22 @@ func (s *Server) doShellJob(
 		return errorResult(fmt.Sprintf("encode shell job result: %v", err)), nil
 	}
 	return ToolCallResult{
-		Content:           []ContentItem{{Type: "text", Text: string(data)}},
-		StructuredContent: result,
+		Content: []ContentItem{{Type: "text", Text: string(data)}},
 	}, nil
 }
 
 func formatShellOutput(events []LineEvent) ToolCallResult {
 	var output strings.Builder
 	hasError := false
-	timedOut := false
-	var exitCode *int
-	warnings := make([]string, 0)
 	for _, evt := range events {
 		switch {
 		case evt.Warning != "":
 			fmt.Fprintf(&output, "[warning] %s\n", evt.Warning)
-			warnings = append(warnings, evt.Warning)
 		case evt.Error != "":
 			fmt.Fprintf(&output, "[error] %s\n", evt.Error)
 			hasError = true
-			timedOut = timedOut || evt.TimedOut
 		case evt.ExitCode != nil:
-			code := *evt.ExitCode
-			exitCode = &code
-			fmt.Fprintf(&output, "\nExit code: %d\n", code)
+			fmt.Fprintf(&output, "\nExit code: %d\n", *evt.ExitCode)
 		case evt.Stream == "stderr":
 			fmt.Fprintf(&output, "[stderr] %s\n", evt.Line)
 		default:
@@ -726,17 +718,12 @@ func formatShellOutput(events []LineEvent) ToolCallResult {
 	if text == "" {
 		text = "(no output)"
 	}
-	structured := map[string]any{
-		"timed_out": timedOut,
-		"warnings":  warnings,
-	}
-	if exitCode != nil {
-		structured["exit_code"] = *exitCode
-	}
+	// The complete payload lives in the content text. Emitting a metadata-only
+	// structuredContent would make MCP clients that prefer structuredContent
+	// (per spec) render an empty shell instead of the output.
 	return ToolCallResult{
-		Content:           []ContentItem{{Type: "text", Text: text}},
-		StructuredContent: structured,
-		IsError:           hasError,
+		Content: []ContentItem{{Type: "text", Text: text}},
+		IsError: hasError,
 	}
 }
 
@@ -772,13 +759,6 @@ func (s *Server) doFileRead(ctx context.Context, t *Transport, args map[string]i
 	}
 	return ToolCallResult{
 		Content: content,
-		StructuredContent: map[string]any{
-			"offset":      offset,
-			"size":        result.Size,
-			"lines":       result.Lines,
-			"total_lines": result.TotalLines,
-			"truncated":   result.Truncated,
-		},
 	}, nil
 }
 
@@ -873,10 +853,6 @@ func (s *Server) doFileGlob(ctx context.Context, t *Transport, args map[string]i
 	}
 	return ToolCallResult{
 		Content: content,
-		StructuredContent: map[string]any{
-			"count":     len(files),
-			"truncated": truncated,
-		},
 	}, nil
 }
 
@@ -911,10 +887,6 @@ func (s *Server) doFileGrep(ctx context.Context, t *Transport, args map[string]i
 	}
 	return ToolCallResult{
 		Content: content,
-		StructuredContent: map[string]any{
-			"count":     len(matches),
-			"truncated": truncated,
-		},
 	}, nil
 }
 
