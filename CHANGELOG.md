@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.13] - 2026-08-18
+
+### Fixed
+
+- Rendered PowerShell 5.1 parser errors as plain text instead of CLIXML when a command is not valid PowerShell (for example bash-style `||` input), by catching `[ScriptBlock]::Create` failures in the executor bootstrap.
+
+### Verification
+
+- Added a bash-style parse-error regression asserting no `#< CLIXML` and no `_xHHHH_` escapes, and strengthened the existing parser-error test with the same assertions.
+
 ## [1.0.12] - 2026-08-18
 
 ### Fixed
@@ -50,7 +60,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.12...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.13...HEAD
+[1.0.13]: https://github.com/newo-ether/conch/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/newo-ether/conch/compare/v1.0.11...v1.0.12
 [1.0.11]: https://github.com/newo-ether/conch/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/newo-ether/conch/compare/v1.0.9...v1.0.10
