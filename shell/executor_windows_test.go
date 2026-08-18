@@ -91,6 +91,24 @@ func TestExecutorRendersBashStyleParseErrorAsPlainText(t *testing.T) {
 	}
 }
 
+func TestExecutorRendersFormatListAndFormatTableOutput(t *testing.T) {
+	for _, command := range []string{
+		"[PSCustomObject]@{ Name = 'alpha'; Value = 42 } | Format-List",
+		"[PSCustomObject]@{ Name = 'alpha'; Value = 42 } | Format-Table",
+	} {
+		result := executeWindowsTestCommand(t, command)
+		if result.exitCode != 0 {
+			t.Fatalf("%q exited %d: %#v", command, result.exitCode, result)
+		}
+		if strings.Contains(result.output, "Object reference not set") {
+			t.Fatalf("%q rendered a NullReferenceException: %q", command, result.output)
+		}
+		if !strings.Contains(result.output, "alpha") {
+			t.Fatalf("%q missing formatted content: %q", command, result.output)
+		}
+	}
+}
+
 func TestExecutorPreservesTailOutputBeforeRootExit(t *testing.T) {
 	const lineCount = 4000
 	result := executeWindowsTestCommand(

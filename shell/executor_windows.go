@@ -55,9 +55,17 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 		"  [Console]::Error.Write(($_ | Out-String))\n" +
 		"  exit 1\n" +
 		"}\n" +
+		"$fmtBuf = [Collections.Generic.List[object]]::new()\n" +
 		"try {\n" +
 		"  & $script *>&1 | ForEach-Object {\n" +
-		"    if ($_ -is [System.Management.Automation.ErrorRecord] -or $_ -is [System.Management.Automation.WarningRecord] -or $_ -is [System.Management.Automation.VerboseRecord] -or $_ -is [System.Management.Automation.DebugRecord]) {\n" +
+		"    $typeName = if ($null -ne $_) { $_.GetType().FullName } else { $null }\n" +
+		"    if ($typeName -like 'Microsoft.PowerShell.Commands.Internal.Format.*') {\n" +
+		"      $fmtBuf.Add($_)\n" +
+		"      if ($typeName -like '*.FormatEndData') {\n" +
+		"        [Console]::Out.Write(($fmtBuf | Out-String))\n" +
+		"        $fmtBuf.Clear()\n" +
+		"      }\n" +
+		"    } elseif ($_ -is [System.Management.Automation.ErrorRecord] -or $_ -is [System.Management.Automation.WarningRecord] -or $_ -is [System.Management.Automation.VerboseRecord] -or $_ -is [System.Management.Automation.DebugRecord]) {\n" +
 		"      [Console]::Error.Write(($_ | Out-String))\n" +
 		"    } else {\n" +
 		"      [Console]::Out.Write(($_ | Out-String))\n" +
