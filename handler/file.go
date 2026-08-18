@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/newo-ether/conch/crypto"
@@ -242,7 +243,26 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("read: %v", err)}, aesKey)
 		return
 	}
-	content := string(buf[:n])
+	// Trim incomplete UTF-8 sequences at both ends: Limit may cut a multi-byte
+	// rune in the middle, and a caller offset may land inside one. Returned
+	// content is always valid UTF-8 so the JSON envelope and clients never see
+	// U+FFFD replacement noise. The two ends are handled independently: a
+	// leading byte that cannot start a rune is dropped one at a time, then a
+	// trailing partial rune is dropped one byte at a time.
+	contentBytes := buf[:n]
+	for len(contentBytes) > 0 {
+		if r, size := utf8.DecodeRune(contentBytes); r != utf8.RuneError || size != 1 {
+			break
+		}
+		contentBytes = contentBytes[1:]
+	}
+	for len(contentBytes) > 0 {
+		if r, size := utf8.DecodeLastRune(contentBytes); r != utf8.RuneError || size != 1 {
+			break
+		}
+		contentBytes = contentBytes[:len(contentBytes)-1]
+	}
+	content := string(contentBytes)
 
 	// Count lines in returned content
 	lines := 0
@@ -256,9 +276,14 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	truncated := req.Offset+int64(n) < info.Size()
+	// Report the file's true line count whenever the file is small enough for a
+	// single bounded read; for larger files the count stays 0 together with
+	// truncated=true, which callers read as "not computed".
 	totalLines := 0
-	if req.Offset == 0 && !truncated {
-		totalLines = lines
+	if info.Size() <= maxFileSize {
+		if _, seekErr := f.Seek(0, io.SeekStart); seekErr == nil {
+			totalLines = countTotalLines(io.LimitReader(f, maxFileSize+1))
+		}
 	}
 	resp := FileReadResponse{
 		Content:    content,
@@ -268,6 +293,22 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Truncated:  truncated,
 	}
 	writeJSONResponse(w, resp, aesKey)
+}
+
+// countTotalLines counts lines with the same convention used for partial reads:
+// an empty stream has zero lines; otherwise one line plus one per '\n'.
+func countTotalLines(r io.Reader) int {
+	data, err := io.ReadAll(r)
+	if err != nil || len(data) == 0 {
+		return 0
+	}
+	total := 1
+	for _, b := range data {
+		if b == '\n' {
+			total++
+		}
+	}
+	return total
 }
 
 // FileImageHandler reads one bounded raster image without any text conversion.
