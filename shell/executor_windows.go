@@ -37,6 +37,13 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 	// Keep only this fixed bootstrap on the command line. It reads the complete caller source as
 	// UTF-8, parses it once, and invokes it. Source therefore retains the public 64 KiB bound without
 	// exceeding Windows' ~32K UTF-16 command-line limit or being persisted in a temporary file.
+	//
+	// All streams are merged through one pipeline (*>&1) and re-emitted as plain text. When the
+	// stderr handle is a pipe, PowerShell 5.1 serializes error/warning records as CLIXML XML with
+	// _xHHHH_ escapes; rendering each record with Out-String and writing it through [Console] keeps
+	// stderr human-readable. Native-command stderr lines surface as ErrorRecords under 2>&1 and are
+	// rendered the same way. A terminating error is caught so its text stays plain and the process
+	// exits 1, matching the exit code of an uncaught throw.
 	const bootstrap = "$ProgressPreference = 'SilentlyContinue'\n" +
 		"[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)\n" +
 		"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n" +
@@ -44,7 +51,18 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 		"$reader = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new($false), $true)\n" +
 		"try { $source = $reader.ReadToEnd() } finally { $reader.Dispose() }\n" +
 		"$script = [ScriptBlock]::Create($source)\n" +
-		"& $script\n" +
+		"try {\n" +
+		"  & $script *>&1 | ForEach-Object {\n" +
+		"    if ($_ -is [System.Management.Automation.ErrorRecord] -or $_ -is [System.Management.Automation.WarningRecord] -or $_ -is [System.Management.Automation.VerboseRecord] -or $_ -is [System.Management.Automation.DebugRecord]) {\n" +
+		"      [Console]::Error.Write(($_ | Out-String))\n" +
+		"    } else {\n" +
+		"      [Console]::Out.Write(($_ | Out-String))\n" +
+		"    }\n" +
+		"  }\n" +
+		"} catch {\n" +
+		"  [Console]::Error.Write(($_ | Out-String))\n" +
+		"  exit 1\n" +
+		"}\n" +
 		"if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\n"
 	cmd := exec.CommandContext(
 		ctx,

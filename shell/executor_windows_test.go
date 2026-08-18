@@ -166,3 +166,16 @@ func executeWindowsTestCommand(t *testing.T, command string) windowsTestResult {
 	result.output = strings.Join(lines, "\n")
 	return result
 }
+
+func TestExecutorRendersPowerShellErrorsAsPlainText(t *testing.T) {
+	result := executeWindowsTestCommand(t, "Write-Error '中文错误消息'")
+	if strings.Contains(result.output, "#< CLIXML") {
+		t.Fatalf("stderr was CLIXML-serialized: %q", result.output)
+	}
+	if !strings.Contains(result.output, "中文错误消息") {
+		t.Fatalf("plain error text missing: %q", result.output)
+	}
+	if strings.Contains(result.output, "_x") {
+		t.Fatalf("output contains CLIXML escapes: %q", result.output)
+	}
+}
