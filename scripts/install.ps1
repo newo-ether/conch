@@ -208,6 +208,8 @@ if (-not $AnsiOk) {
 function Prompt-User {
     param([string]$Message, [string]$Default = "Y")
     if ($Yes) { return ($Default -eq "Y") }
+    if ($env:CONCH_YES -eq "1") { return ($Default -eq "Y") }
+    if ([Console]::IsInputRedirected) { return ($Default -eq "Y") }
     $choices = if ($Default -eq "Y") { "[Y/n]" } else { "[y/N]" }
     $reply = Read-Host "    ? ${Message} ${choices}"
     if ([string]::IsNullOrWhiteSpace($reply)) { return ($Default -eq "Y") }
@@ -262,6 +264,11 @@ function Find-Nssm {
         "$env:ChocolateyInstall\bin\nssm.exe",
         "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\NSSM.NSSM_*\win64\nssm.exe"
     )
+    # The installer's own directory is checked first so an upgrade can reuse the
+    # nssm.exe it installed previously instead of falling through to winget.
+    if (-not [string]::IsNullOrWhiteSpace($InstallDir)) {
+        $paths = @("$InstallDir\nssm.exe") + $paths
+    }
     foreach ($p in $paths) {
         $resolved = Get-Item $p -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($resolved) { return Get-Command $resolved.FullName }
@@ -335,10 +342,14 @@ if (-not $Uninstall) {
     if ($portInUse) {
         $proc = Get-Process -Id $portInUse.OwningProcess -ErrorAction SilentlyContinue
         $procName = if ($proc) { $proc.ProcessName } else { "unknown" }
-        Write-Warn "Port $Port is already in use by: $procName"
-        if (-not $Yes -and -not (Prompt-User "Continue anyway?" -Default "Y")) {
-            Write-Info "Aborted. Choose a different port with -Port <number>"
-            return
+        if ($procName -eq "conch") {
+            Write-Info "Port $Port is held by an existing Conch process - continuing"
+        } else {
+            Write-Warn "Port $Port is already in use by: $procName"
+            if (-not $Yes -and -not (Prompt-User "Continue anyway?" -Default "Y")) {
+                Write-Info "Aborted. Choose a different port with -Port <number>"
+                return
+            }
         }
     } else {
         Write-OK "Port $Port available"
@@ -605,8 +616,11 @@ function Download-Url {
 }
 
 function Get-ExpectedReleaseHash {
-    param([string]$Name)
-    if (-not (Test-Path $ChecksumManifest)) {
+    param([string]$Name, [switch]$Refresh)
+    if ($Refresh -and (Test-Path -LiteralPath $ChecksumManifest)) {
+        Remove-Item -LiteralPath $ChecksumManifest -Force -ErrorAction SilentlyContinue
+    }
+    if (-not (Test-Path -LiteralPath $ChecksumManifest)) {
         Write-Info "Downloading signed-release checksum manifest..."
         Download-Url "$GitHubReleases/checksums.txt" $ChecksumManifest "download checksums.txt"
     }
@@ -621,20 +635,25 @@ function Download-File {
     param([string]$Name, [string]$Dest)
     $url = "$GitHubReleases/$Name"
     Write-Info "Downloading $Name from release $Version..."
-    try {
-        $expected = Get-ExpectedReleaseHash $Name
-        Download-Url $url $Dest "download $Name"
-        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Dest).Hash.ToLowerInvariant()
-        if ($actual -ne $expected) {
-            throw "SHA-256 mismatch for $Name (expected $expected, got $actual)"
+    # The first attempt trusts a cached checksum manifest; a second attempt
+    # refreshes it. A stale manifest (release assets replaced under the same
+    # version string) must never strand an install on old hashes.
+    foreach ($refresh in @($false, $true)) {
+        try {
+            $expected = Get-ExpectedReleaseHash $Name -Refresh:$refresh
+            Download-Url $url $Dest "download $Name"
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Dest).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) {
+                throw "SHA-256 mismatch for $Name (expected $expected, got $actual)"
+            }
+            Write-OK "Verified SHA-256: $Name"
+            return $true
+        } catch {
+            Write-Warn "Verified download failed: $($_.Exception.Message.Split([Environment]::NewLine)[0])"
+            if (Test-Path -LiteralPath $Dest) { Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue }
         }
-        Write-OK "Verified SHA-256: $Name"
-        return $true
-    } catch {
-        Write-Warn "Verified download failed: $($_.Exception.Message.Split([Environment]::NewLine)[0])"
-        if (Test-Path $Dest) { Remove-Item $Dest -Force -ErrorAction SilentlyContinue }
-        return $false
     }
+    return $false
 }
 
 $SrcBin = $null

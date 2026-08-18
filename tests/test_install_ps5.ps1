@@ -149,4 +149,43 @@ if (-not $releaseBuilderText.Contains('$checksumContent = [string]::Join("`n", $
     throw "Release checksum manifest is not normalized to LF"
 }
 
+$findNssmText = $functions["Find-Nssm"].Extent.Text
+if ($findNssmText -notmatch '\$InstallDir\\nssm\.exe') {
+    throw "Find-Nssm does not prefer the installer's own nssm.exe"
+}
+$promptText = $functions["Prompt-User"].Extent.Text
+if ($promptText -notmatch 'CONCH_YES') {
+    throw "Prompt-User does not honor CONCH_YES"
+}
+if ($promptText -notmatch 'IsInputRedirected') {
+    throw "Prompt-User does not default on redirected stdin"
+}
+$hashText = $functions["Get-ExpectedReleaseHash"].Extent.Text
+if ($hashText -notmatch '\[switch\]\$Refresh') {
+    throw "Get-ExpectedReleaseHash lacks the Refresh switch"
+}
+if ($hashText -notmatch 'Remove-Item -LiteralPath \$ChecksumManifest') {
+    throw "Get-ExpectedReleaseHash Refresh does not remove the stale manifest"
+}
+$downloadText = $functions["Download-File"].Extent.Text
+if ($downloadText -notmatch 'foreach \(\$refresh') {
+    throw "Download-File does not retry with a refreshed checksum manifest"
+}
+if ($installerText -notmatch 'held by an existing Conch process') {
+    throw "Installer still prompts when the port is held by an existing Conch process"
+}
+
+$env:CONCH_YES = "1"
+try {
+    . ([scriptblock]::Create($functions["Prompt-User"].Extent.Text))
+    if (-not (Prompt-User "probe" -Default "Y")) {
+        throw "Prompt-User ignored CONCH_YES for a yes-default prompt"
+    }
+    if (Prompt-User "probe" -Default "N") {
+        throw "Prompt-User broke no-default handling under CONCH_YES"
+    }
+} finally {
+    Remove-Item Env:\CONCH_YES -ErrorAction SilentlyContinue
+}
+
 Write-Host "install.ps1 PowerShell 5 regression checks passed."
