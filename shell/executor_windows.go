@@ -50,7 +50,11 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 		"$OutputEncoding = [Console]::OutputEncoding\n" +
 		"$reader = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new($false), $true)\n" +
 		"try { $source = $reader.ReadToEnd() } finally { $reader.Dispose() }\n" +
-		"$script = [ScriptBlock]::Create($source)\n" +
+		"try { $script = [ScriptBlock]::Create($source) }\n" +
+		"catch {\n" +
+		"  [Console]::Error.Write(($_ | Out-String))\n" +
+		"  exit 1\n" +
+		"}\n" +
 		"try {\n" +
 		"  & $script *>&1 | ForEach-Object {\n" +
 		"    if ($_ -is [System.Management.Automation.ErrorRecord] -or $_ -is [System.Management.Automation.WarningRecord] -or $_ -is [System.Management.Automation.VerboseRecord] -or $_ -is [System.Management.Automation.DebugRecord]) {\n" +

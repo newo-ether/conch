@@ -67,6 +67,28 @@ func TestExecutorReportsPowerShellParserErrorsAsNonzero(t *testing.T) {
 	if strings.TrimSpace(result.output) == "" {
 		t.Fatalf("parser diagnostic missing: %#v", result)
 	}
+	if strings.Contains(result.output, "#< CLIXML") {
+		t.Fatalf("parse error was CLIXML-serialized: %q", result.output)
+	}
+	if strings.Contains(result.output, "_x") {
+		t.Fatalf("output contains CLIXML escapes: %q", result.output)
+	}
+}
+
+func TestExecutorRendersBashStyleParseErrorAsPlainText(t *testing.T) {
+	result := executeWindowsTestCommand(t, "cd /f/workspace 2>/dev/null || cd /f/workspace 2>/dev/null; echo hi")
+	if result.exitCode == 0 {
+		t.Fatalf("bash-style syntax unexpectedly parsed: %#v", result)
+	}
+	if strings.TrimSpace(result.output) == "" {
+		t.Fatalf("parse diagnostic missing: %#v", result)
+	}
+	if strings.Contains(result.output, "#< CLIXML") {
+		t.Fatalf("parse error was CLIXML-serialized: %q", result.output)
+	}
+	if strings.Contains(result.output, "_x") {
+		t.Fatalf("output contains CLIXML escapes: %q", result.output)
+	}
 }
 
 func TestExecutorPreservesTailOutputBeforeRootExit(t *testing.T) {
