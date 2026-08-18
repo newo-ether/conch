@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.12] - 2026-08-18
+
+### Fixed
+
+- Removed metadata-only `structuredContent` from every MCP tool result so clients that prefer structuredContent (per spec) display the full payload instead of an empty summary shell.
+- Rendered PowerShell 5.1 stderr as plain text instead of CLIXML-serialized records with `_xHHHH_` escapes.
+- Trimmed partial UTF-8 sequences at both ends of file_read ranges so limits and offsets that cut multi-byte runes return valid UTF-8 without U+FFFD replacement characters.
+- Reported the whole-file line count for truncated file_read responses instead of a constant zero.
+- Refreshed a stale cached checksum manifest once when a verified download fails, so releases updated under the same version string no longer strand installs on old hashes.
+- Made Find-Nssm prefer the installer's own nssm.exe, avoiding the slow winget fallback on upgrades.
+- Defaulted unattended prompts (CONCH_YES=1, redirected stdin, port held by an existing Conch process) so piped or elevated installs cannot hang waiting for input.
+
+### Verification
+
+- Added regressions for tool-result payload shape (including an encrypted file_read round trip), plain-text stderr with CJK messages, rune-boundary truncation and offsets, whole-file line counts, and installer hardening contracts.
+- Passed gofmt, go vet, the full Go test suite, a 20-run stability gate, the race detector, and PowerShell 5 installer regressions.
+
 ## [1.0.11] - 2026-08-12
 
 ### Fixed
@@ -33,6 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.11...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.12...HEAD
+[1.0.12]: https://github.com/newo-ether/conch/compare/v1.0.11...v1.0.12
 [1.0.11]: https://github.com/newo-ether/conch/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/newo-ether/conch/compare/v1.0.9...v1.0.10
