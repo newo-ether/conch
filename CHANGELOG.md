@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.14] - 2026-08-18
+
+### Fixed
+
+- Rendered PowerShell 5.1 `Format-List` / `Format-Table` output correctly by buffering the internal formatting-object sequence and formatting it as a whole instead of per object, which previously threw a `NullReferenceException` from `out-lineoutput`.
+
+### Verification
+
+- Added a regression covering `Format-List` and `Format-Table` output, asserting exit 0, no `Object reference not set`, and the expected content.
+
 ## [1.0.13] - 2026-08-18
 
 ### Fixed
@@ -60,7 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.13...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.14...HEAD
+[1.0.14]: https://github.com/newo-ether/conch/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/newo-ether/conch/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/newo-ether/conch/compare/v1.0.11...v1.0.12
 [1.0.11]: https://github.com/newo-ether/conch/compare/v1.0.10...v1.0.11
