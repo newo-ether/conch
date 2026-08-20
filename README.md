@@ -1,7 +1,5 @@
 # conch
 
-**English** | [中文](README_CN.md)
-
 A lightweight, zero-dependency shell execution server with SSE streaming and end-to-end encryption. Expose a shell on any device — Linux server, Termux (Android), Windows — and control it securely over the network. Ships with a companion MCP binary for Claude Desktop integration.
 
 ## Features
