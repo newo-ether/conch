@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 var configEnvironmentKeys = []string{
@@ -24,6 +25,20 @@ func clearConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, key := range configEnvironmentKeys {
 		t.Setenv(key, "")
+	}
+}
+
+func TestLoadUsesThirtyMinuteMaxTimeoutDefault(t *testing.T) {
+	clearConfigEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Timeout != 30*time.Second {
+		t.Fatalf("Timeout = %s, want 30s", cfg.Timeout)
+	}
+	if cfg.MaxTimeout != 30*time.Minute {
+		t.Fatalf("MaxTimeout = %s, want 30m", cfg.MaxTimeout)
 	}
 }
 

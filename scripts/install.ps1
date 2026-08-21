@@ -19,7 +19,7 @@
     Default command timeout in seconds. Default: 30.
 
 .PARAMETER MaxTimeoutSec
-    Maximum command timeout in seconds. Default: 120.
+    Maximum command timeout in seconds. Default: 1800.
 
 .PARAMETER NoAuth
     Disable authentication. Insecure, dev only.
@@ -71,7 +71,7 @@ param(
     [ValidateRange(1, 604800)]
     [int]   $TimeoutSec    = 30,
     [ValidateRange(1, 604800)]
-    [int]   $MaxTimeoutSec = 120,
+    [int]   $MaxTimeoutSec = 1800,
     [switch]$NoAuth        = $false,
     [string]$BinaryPath    = "",
     [string]$McpBinaryPath = "",

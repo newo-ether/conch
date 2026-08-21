@@ -37,6 +37,7 @@ assert_contains() {
         { echo "missing installer hardening marker: $needle" >&2; exit 1; }
 }
 
+assert_contains 'DEFAULT_MAX_TIMEOUT=1800'
 assert_contains 'checksums.txt'
 assert_contains 'Verified SHA-256'
 assert_contains 'SERVICE_WAS_ACTIVE=false'

@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.15] - 2026-08-21
+
+### Changed
+
+- Raised the default synchronous shell timeout ceiling from 120 seconds to 1800 seconds (30 minutes) across the server configuration and both installers.
+- Kept the ordinary per-command timeout default at 30 seconds, so long-running calls still require an explicit `timeout_ms`.
+
+### Verification
+
+- Added regressions requiring the 30-second command default and 30-minute maximum, plus installer contracts that keep both platform defaults at 1800 seconds.
+
 ## [1.0.14] - 2026-08-18
 
 ### Fixed
@@ -70,7 +81,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.14...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.15...HEAD
+[1.0.15]: https://github.com/newo-ether/conch/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/newo-ether/conch/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/newo-ether/conch/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/newo-ether/conch/compare/v1.0.11...v1.0.12

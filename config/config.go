@@ -34,7 +34,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxTimeoutSeconds, err := envInt("CONCH_MAX_TIMEOUT", 120)
+	maxTimeoutSeconds, err := envInt("CONCH_MAX_TIMEOUT", 1800)
 	if err != nil {
 		return nil, err
 	}

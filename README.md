@@ -97,7 +97,7 @@ curl -s http://localhost:14216/health
 | `CONCH_API_KEY` | _(required)_ | Pre-shared key for HMAC signing and key-exchange verification. Server refuses to start without it unless `CONCH_ALLOW_NO_AUTH=true`. |
 | `CONCH_ALLOW_NO_AUTH` | `false` | Start without an API key. Encryption and signing are disabled; all requests are accepted in plaintext. |
 | `CONCH_TIMEOUT` | `30` | Default command timeout in seconds |
-| `CONCH_MAX_TIMEOUT` | `120` | Maximum allowed timeout in seconds |
+| `CONCH_MAX_TIMEOUT` | `1800` | Maximum allowed timeout in seconds (30 minutes) |
 | `CONCH_JOB_DIR` | OS user config directory | Directory containing durable background-job snapshots |
 | `CONCH_JOB_RETENTION_HOURS` | `168` | Retain completed background jobs for this many hours |
 | `CONCH_MAX_JOB_TIMEOUT_SECONDS` | `86400` | Maximum runtime of one background job |

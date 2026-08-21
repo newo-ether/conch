@@ -105,11 +105,16 @@ foreach ($marker in @(
     "Restore previous conch.exe and service registration",
     "Restore previous service running state",
     "ValidateRange(1, 65535)",
-    "TimeoutSec must not exceed MaxTimeoutSec"
+    "TimeoutSec must not exceed MaxTimeoutSec",
+    "Default: 1800."
 )) {
     if ($installerText -notmatch [Regex]::Escape($marker)) {
         throw "Missing installer hardening marker: $marker"
     }
+}
+
+if (-not $installerText.Contains('[int]   $MaxTimeoutSec = 1800,')) {
+    throw "PowerShell installer MaxTimeoutSec default is not 1800"
 }
 
 $tempManifest = Join-Path $env:TEMP ("conch-checksums-" + [Guid]::NewGuid().ToString("N") + ".txt")

@@ -14,7 +14,7 @@ set -euo pipefail
 DEFAULT_PORT=14216
 DEFAULT_HOST="0.0.0.0"
 DEFAULT_TIMEOUT=30
-DEFAULT_MAX_TIMEOUT=120
+DEFAULT_MAX_TIMEOUT=1800
 DEFAULT_RELEASE_VERSION="latest"
 
 # ============================================================================
