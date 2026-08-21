@@ -30,9 +30,10 @@ type LineEvent struct {
 
 // Transport handles the encrypted Conch protocol.
 type Transport struct {
-	serverURL string
-	apiKey    []byte
-	client    *http.Client
+	serverURL     string
+	apiKey        []byte
+	client        *http.Client
+	executeClient *http.Client
 
 	initMu         sync.Mutex
 	stateMu        sync.RWMutex
@@ -46,8 +47,9 @@ func NewTransport(serverURL, apiKey string) *Transport {
 		serverURL: serverURL,
 		apiKey:    []byte(apiKey),
 		client: &http.Client{
-			Timeout: 130 * time.Second, // max timeout + buffer
+			Timeout: 130 * time.Second, // bounds initialization and control/file requests
 		},
+		executeClient: &http.Client{},
 	}
 }
 
@@ -238,14 +240,22 @@ func (t *Transport) Execute(
 	workdir string,
 ) (events []LineEvent, err error) {
 	defer func() { t.recordOperation(err) }()
-	events, err = t.executeOnce(ctx, command, timeoutMs, workdir)
+
+	requestTimeout, err := shellExecuteRequestTimeout(timeoutMs)
+	if err != nil {
+		return nil, err
+	}
+	executeCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
+	events, err = t.executeOnce(executeCtx, command, timeoutMs, workdir)
 	if !isStaleServerKeyError(err) {
 		return events, err
 	}
-	if err = t.Initialize(ctx); err != nil {
+	if err = t.Initialize(executeCtx); err != nil {
 		return nil, fmt.Errorf("refresh server key: %w", err)
 	}
-	return t.executeOnce(ctx, command, timeoutMs, workdir)
+	return t.executeOnce(executeCtx, command, timeoutMs, workdir)
 }
 
 func (t *Transport) executeOnce(ctx context.Context, command string, timeoutMs int, workdir string) ([]LineEvent, error) {
@@ -305,7 +315,7 @@ func (t *Transport) executeOnce(ctx context.Context, command string, timeoutMs i
 	req.Header.Set("X-Encryption", "v1")
 	req.Header.Set("X-Client-Public-Key", clientPubKey)
 
-	resp, err := t.client.Do(req)
+	resp, err := t.executeClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("execute: %w", err)
 	}

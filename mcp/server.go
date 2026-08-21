@@ -32,12 +32,17 @@ var allTools = []Tool{
 		InputSchema: JSONSchema{
 			Type: "object",
 			Properties: map[string]JSONProp{
-				"device":     {Type: "string", Description: "The target device name"},
-				"command":    {Type: "string", Description: "The shell command to execute"},
-				"timeout_ms": {Type: "integer", Description: "Timeout in milliseconds (default: 30000, server-bounded)", Default: 30000},
-				"workdir":    {Type: "string", Description: "Working directory for the command (optional)"},
+				"device":  {Type: "string", Description: "The target device name"},
+				"command": {Type: "string", Description: "The shell command to execute"},
+				"timeout_ms": {
+					Type:        "integer",
+					Description: "Required execution timeout in milliseconds; maximum 1800000 (30 minutes)",
+					Minimum:     minShellExecuteTimeoutMs,
+					Maximum:     maxShellExecuteTimeoutMs,
+				},
+				"workdir": {Type: "string", Description: "Working directory for the command (optional)"},
 			},
-			Required: []string{"device", "command"},
+			Required: []string{"device", "command", "timeout_ms"},
 		},
 	},
 	{
@@ -616,9 +621,9 @@ func (s *Server) doShellExecute(ctx context.Context, t *Transport, args map[stri
 	if command == "" {
 		return errorResult("command is required"), nil
 	}
-	timeoutMs := 30000
-	if val, ok := args["timeout_ms"].(float64); ok {
-		timeoutMs = int(val)
+	timeoutMs, err := requiredShellExecuteTimeoutMs(args)
+	if err != nil {
+		return errorResult(err.Error()), nil
 	}
 	workdir, _ := args["workdir"].(string)
 

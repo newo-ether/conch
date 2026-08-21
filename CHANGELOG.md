@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.16] - 2026-08-21
+
+### Fixed
+
+- Removed the MCP bridge's independent 130-second HTTP limit for `shell_execute`; each request now uses its explicit `timeout_ms` plus a small settlement margin while the server remains the hard 30-minute ceiling.
+- Made `shell_execute.timeout_ms` required and rejected non-integer or out-of-range values outside 1–1800000 milliseconds instead of silently applying a transport default.
+
+### Verification
+
+- Added schema, validation, deadline derivation, control-client isolation, cancellation, and retry-safety regressions for the per-call timeout contract.
+
 ## [1.0.15] - 2026-08-21
 
 ### Changed
@@ -81,7 +92,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.15...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.16...HEAD
+[1.0.16]: https://github.com/newo-ether/conch/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/newo-ether/conch/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/newo-ether/conch/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/newo-ether/conch/compare/v1.0.12...v1.0.13

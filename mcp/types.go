@@ -70,6 +70,8 @@ type JSONProp struct {
 	Type        string `json:"type"`
 	Description string `json:"description"`
 	Default     any    `json:"default,omitempty"`
+	Minimum     int    `json:"minimum,omitempty"`
+	Maximum     int    `json:"maximum,omitempty"`
 }
 
 type ToolCallParams struct {

@@ -257,7 +257,7 @@ The `conch-mcp` binary exposes bounded synchronous shell execution, explicit dur
 |-----------|------|----------|---------|-------------|
 | `device` | string | yes* | — | Target device name (required when managing multiple devices) |
 | `command` | string | yes | — | Shell command to execute |
-| `timeout_ms` | integer | no | 30000 | Timeout in milliseconds (bounded by the server's configured maximum) |
+| `timeout_ms` | integer | yes | — | Per-call execution timeout in milliseconds (1–1800000); the MCP request deadline is this value plus a small settlement margin, and the server enforces the 30-minute ceiling |
 | `workdir` | string | no | — | Working directory |
 
 Durable execution uses `shell_start`, `shell_jobs`, `shell_job_get`, `shell_job_stop`, and `shell_job_ack`; it is never entered by silently retrying a timed-out synchronous command. File tools are `file_read`, `view_image`, `file_write`, `file_edit`, `file_glob`, and `file_grep`. `file_edit` executes atomically on the target and optionally accepts `expected_sha256`.
