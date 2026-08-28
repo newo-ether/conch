@@ -550,7 +550,6 @@ func (s *Server) doListDevices() ToolCallResult {
 		Name            string   `json:"name"`
 		Description     string   `json:"description"`
 		URL             string   `json:"url"`
-		Available       bool     `json:"available"`
 		Version         string   `json:"version,omitempty"`
 		Revision        string   `json:"revision,omitempty"`
 		ProtocolVersion string   `json:"protocol_version,omitempty"`
@@ -566,21 +565,16 @@ func (s *Server) doListDevices() ToolCallResult {
 	for _, name := range names {
 		cfg := s.devices[name]
 		transport, configured := s.transports[name]
-		available := false
 		errorText := s.unavailable[name]
 		var metadata buildinfo.Metadata
 		if configured {
-			available, errorText = transport.Status()
+			_, errorText = transport.Status()
 			metadata = transport.Metadata()
-			if available {
-				errorText = ""
-			}
 		}
 		devices = append(devices, DeviceInfo{
 			Name:            name,
 			Description:     cfg.Description,
 			URL:             cfg.URL,
-			Available:       available,
 			Version:         metadata.Version,
 			Revision:        metadata.Revision,
 			ProtocolVersion: metadata.ProtocolVersion,
@@ -597,11 +591,10 @@ func (s *Server) doListDevices() ToolCallResult {
 		sort.Strings(names)
 		for _, name := range names {
 			transport := s.transports[name]
-			available, errorText := transport.Status()
+			_, errorText := transport.Status()
 			metadata := transport.Metadata()
 			devices = append(devices, DeviceInfo{
 				Name:            name,
-				Available:       available,
 				Version:         metadata.Version,
 				Revision:        metadata.Revision,
 				ProtocolVersion: metadata.ProtocolVersion,

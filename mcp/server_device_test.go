@@ -8,7 +8,7 @@ import (
 	conchcrypto "github.com/newo-ether/conch/crypto"
 )
 
-func TestListDevicesIncludesUnavailableWithoutDroppingHealthyDevices(t *testing.T) {
+func TestListDevicesOmitsAvailableWithoutDroppingConfiguredDevices(t *testing.T) {
 	keyPair, err := conchcrypto.GenerateKeyPair()
 	if err != nil {
 		t.Fatal(err)
@@ -26,22 +26,31 @@ func TestListDevicesIncludesUnavailableWithoutDroppingHealthyDevices(t *testing.
 	if result.IsError || len(result.Content) != 1 {
 		t.Fatalf("unexpected result: %#v", result)
 	}
-	var devices []struct {
-		Name      string `json:"name"`
-		Available bool   `json:"available"`
-		Error     string `json:"error"`
+	text := result.Content[0].Text
+	var rawDevices []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &rawDevices); err != nil {
+		t.Fatalf("decode raw devices: %v", err)
 	}
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &devices); err != nil {
+	for _, device := range rawDevices {
+		if _, exists := device["available"]; exists {
+			t.Fatalf("list_devices must omit available: %s", text)
+		}
+	}
+
+	var devices []struct {
+		Name  string `json:"name"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(text), &devices); err != nil {
 		t.Fatalf("decode devices: %v", err)
 	}
 	if len(devices) != 2 {
 		t.Fatalf("got %d devices, want 2", len(devices))
 	}
-	if devices[0].Name != "healthy" || !devices[0].Available {
+	if devices[0].Name != "healthy" {
 		t.Fatalf("healthy device missing: %#v", devices)
 	}
-	if devices[1].Name != "offline" || devices[1].Available ||
-		devices[1].Error != "connection refused" {
+	if devices[1].Name != "offline" || devices[1].Error != "connection refused" {
 		t.Fatalf("offline state missing: %#v", devices)
 	}
 }
