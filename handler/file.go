@@ -430,6 +430,108 @@ func (h *FileWriteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, FileWriteResponse{OK: true, SHA256: hash}, aesKey)
 }
 
+func fileEditMatchRanges(content string, oldString string) [][2]int {
+	normalizedContent := make([]byte, 0, len(content))
+	originalBoundaries := make([]int, 1, len(content)+1)
+	for originalIndex := 0; originalIndex < len(content); {
+		if content[originalIndex] == '\r' && originalIndex+1 < len(content) && content[originalIndex+1] == '\n' {
+			normalizedContent = append(normalizedContent, '\n')
+			originalIndex += 2
+		} else {
+			normalizedContent = append(normalizedContent, content[originalIndex])
+			originalIndex++
+		}
+		originalBoundaries = append(originalBoundaries, originalIndex)
+	}
+
+	normalizedText := string(normalizedContent)
+	normalizedOldString := strings.ReplaceAll(oldString, "\r\n", "\n")
+	matches := make([][2]int, 0)
+	for searchIndex := 0; searchIndex <= len(normalizedText)-len(normalizedOldString); {
+		relativeStart := strings.Index(normalizedText[searchIndex:], normalizedOldString)
+		if relativeStart < 0 {
+			break
+		}
+		normalizedStart := searchIndex + relativeStart
+		normalizedEnd := normalizedStart + len(normalizedOldString)
+		matches = append(matches, [2]int{
+			originalBoundaries[normalizedStart],
+			originalBoundaries[normalizedEnd],
+		})
+		searchIndex = normalizedEnd
+	}
+	return matches
+}
+
+func replaceFileEditMatches(content string, matches [][2]int, newString string) string {
+	if len(matches) == 0 {
+		return content
+	}
+
+	fileLineEnding := preferredFileEditLineEnding(content)
+	var replaced strings.Builder
+	replaced.Grow(len(content))
+	sourceIndex := 0
+	for _, match := range matches {
+		replaced.WriteString(content[sourceIndex:match[0]])
+		lineEnding := preferredFileEditLineEnding(content[match[0]:match[1]])
+		if lineEnding == "" {
+			lineEnding = fileLineEnding
+		}
+		if lineEnding == "" {
+			lineEnding = preferredFileEditLineEnding(newString)
+		}
+		if lineEnding == "" {
+			lineEnding = "\n"
+		}
+		replaced.WriteString(withFileEditLineEnding(newString, lineEnding))
+		sourceIndex = match[1]
+	}
+	replaced.WriteString(content[sourceIndex:])
+	return replaced.String()
+}
+
+func preferredFileEditLineEnding(text string) string {
+	crlfCount := 0
+	lfCount := 0
+	firstLineEnding := ""
+	for index := 0; index < len(text); {
+		if text[index] == '\r' && index+1 < len(text) && text[index+1] == '\n' {
+			crlfCount++
+			if firstLineEnding == "" {
+				firstLineEnding = "\r\n"
+			}
+			index += 2
+			continue
+		}
+		if text[index] == '\n' {
+			lfCount++
+			if firstLineEnding == "" {
+				firstLineEnding = "\n"
+			}
+		}
+		index++
+	}
+	if crlfCount > lfCount {
+		return "\r\n"
+	}
+	if lfCount > crlfCount {
+		return "\n"
+	}
+	return firstLineEnding
+}
+
+func withFileEditLineEnding(text string, lineEnding string) string {
+	if !strings.Contains(text, "\n") {
+		return text
+	}
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	if lineEnding == "\n" {
+		return normalized
+	}
+	return strings.ReplaceAll(normalized, "\n", lineEnding)
+}
+
 // FileEditHandler performs a bounded server-side compare-and-swap edit. The entire file is read
 // and replaced on the target host, so MCP never rewrites a truncated /file/read response.
 type FileEditHandler struct {
@@ -514,7 +616,8 @@ func (h *FileEditHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	content := string(data)
-	count := strings.Count(content, req.OldString)
+	matches := fileEditMatchRanges(content, req.OldString)
+	count := len(matches)
 	if count == 0 {
 		writeJSONResponse(w, map[string]string{"error": "old_string not found in file"}, aesKey)
 		return
@@ -529,11 +632,12 @@ func (h *FileEditHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	replacementCount := count
-	replaced := strings.ReplaceAll(content, req.OldString, req.NewString)
+	selectedMatches := matches
 	if !req.ReplaceAll {
 		replacementCount = 1
-		replaced = strings.Replace(content, req.OldString, req.NewString, 1)
+		selectedMatches = matches[:1]
 	}
+	replaced := replaceFileEditMatches(content, selectedMatches, req.NewString)
 	if len(replaced) > maxEditableFileSize {
 		writeJSONResponse(w, map[string]string{"error": "edited file exceeds 16MB limit"}, aesKey)
 		return

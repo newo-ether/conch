@@ -54,6 +54,81 @@ func TestFileEditHandlesLargeFileWithoutTruncatingTail(t *testing.T) {
 	}
 }
 
+func TestFileEditMatchesEquivalentLineEndingsAndPreservesTargetStyle(t *testing.T) {
+	tests := []struct {
+		name       string
+		original   string
+		oldString  string
+		newString  string
+		replaceAll bool
+		want       string
+		count      int
+	}{
+		{
+			name:      "LF request edits CRLF file",
+			original:  "before\r\nalpha\r\nbeta\r\nafter\r\n",
+			oldString: "alpha\nbeta",
+			newString: "gamma\ndelta",
+			want:      "before\r\ngamma\r\ndelta\r\nafter\r\n",
+			count:     1,
+		},
+		{
+			name:      "CRLF request edits LF file",
+			original:  "before\nalpha\nbeta\nafter\n",
+			oldString: "alpha\r\nbeta",
+			newString: "gamma\r\ndelta",
+			want:      "before\ngamma\ndelta\nafter\n",
+			count:     1,
+		},
+		{
+			name:       "replace all follows each matched span",
+			original:   "one\r\ntwo|one\ntwo|tail\r\n",
+			oldString:  "one\ntwo",
+			newString:  "three\nfour",
+			replaceAll: true,
+			want:       "three\r\nfour|three\nfour|tail\r\n",
+			count:      2,
+		},
+		{
+			name:      "single line match follows file style",
+			original:  "head\r\ntarget\r\ntail\r\n",
+			oldString: "target",
+			newString: "first\nsecond",
+			want:      "head\r\nfirst\r\nsecond\r\ntail\r\n",
+			count:     1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "edit.txt")
+			if err := os.WriteFile(path, []byte(test.original), 0644); err != nil {
+				t.Fatal(err)
+			}
+			response := callPlainFileHandler(t, &FileEditHandler{}, "/file/edit", FileEditRequest{
+				Path:       path,
+				OldString:  test.oldString,
+				NewString:  test.newString,
+				ReplaceAll: test.replaceAll,
+			})
+			var result FileEditResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatalf("decode response: %v: %s", err, response.Body.String())
+			}
+			if !result.OK || result.Replacements != test.count || result.SHA256 == "" {
+				t.Fatalf("unexpected response: %#v", result)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != test.want {
+				t.Fatalf("content = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestFileEditCASConflictDoesNotMutateFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cas.txt")
 	original := []byte("before")
