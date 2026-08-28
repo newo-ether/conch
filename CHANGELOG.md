@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.17] - 2026-08-28
+
+### Fixed
+
+- Removed the MCP `list_devices.available` property because it represented cached last-operation state rather than live device reachability; configured device metadata and diagnostic errors remain available.
+- Made `file_edit` treat LF and CRLF line breaks as equivalent while matching, then preserve each matched region's line-ending style for multiline replacements, including mixed-ending `replace_all` operations.
+
+### Verification
+
+- Added a raw-JSON regression requiring `list_devices` results to omit `available`.
+- Added handler regressions for LF requests editing CRLF files, CRLF requests editing LF files, per-match line-ending preservation in mixed files, and multiline insertion from a single-line match.
+
 ## [1.0.16] - 2026-08-21
 
 ### Fixed
@@ -92,7 +104,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.16...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.17...HEAD
+[1.0.17]: https://github.com/newo-ether/conch/compare/v1.0.16...v1.0.17
 [1.0.16]: https://github.com/newo-ether/conch/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/newo-ether/conch/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/newo-ether/conch/compare/v1.0.13...v1.0.14
