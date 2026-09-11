@@ -484,15 +484,37 @@ function Invoke-Nssm {
 # ============================================================================
 # Helper: atomic file write (write temp, then move)
 # ============================================================================
+function Protect-SecretFile {
+    param([string]$Path)
+    if ((Get-Item -LiteralPath $Path).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Secret files must not be links'
+    }
+    $acl = New-Object Security.AccessControl.FileSecurity
+    $acl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)')
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Protect-ServiceSecrets {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
+    $acl = New-Object Security.AccessControl.RegistrySecurity
+    $acl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;CI;KA;;;SY)(A;CI;KA;;;BA)')
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 function Write-AtomicConfig {
     param([string]$Content, [string]$Target)
     $swapID = [Guid]::NewGuid().ToString("N")
     $tmp = "$Target.tmp.$swapID"
     $backup = "$Target.swap-backup.$swapID"
     $utf8 = New-Object Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText($tmp, $Content, $utf8)
     try {
+        # Set permissions while the new file is still empty, before writing any secret.
+        New-Item -ItemType File -Path $tmp -ErrorAction Stop | Out-Null
+        Protect-SecretFile $tmp
+        [IO.File]::WriteAllText($tmp, $Content, $utf8)
         if (Test-Path -LiteralPath $Target) {
+            Protect-SecretFile $Target
             [IO.File]::Replace($tmp, $Target, $backup, $true)
         } else {
             Move-Item -LiteralPath $tmp -Destination $Target -ErrorAction Stop
@@ -892,8 +914,12 @@ function Set-EnvValue {
 }
 
 $EnvBackup = "$EnvFile.previous"
+foreach ($existingSecret in @(Get-ChildItem -LiteralPath $InstallDir -File -Force |
+        Where-Object { $_.Name -eq 'env.txt' -or $_.Name -like 'env.txt.*' })) {
+    Protect-SecretFile $existingSecret.FullName
+}
 if (Test-Path $EnvFile) {
-    Copy-Item -Force -LiteralPath $EnvFile -Destination $EnvBackup
+    Write-AtomicConfig ([IO.File]::ReadAllText($EnvFile)) $EnvBackup
     Push-Rollback {
         Copy-Item -Force -LiteralPath $EnvBackup -Destination $EnvFile -ErrorAction SilentlyContinue
     } "Restore previous configuration"
@@ -1001,6 +1027,7 @@ Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "DisplayName", "Con
 Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "AppExit", "Default", "Restart")
 
 # Environment variables
+Protect-ServiceSecrets "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName\Parameters"
 $envLines = @(
     Get-Content -LiteralPath $EnvFile |
         Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' }
