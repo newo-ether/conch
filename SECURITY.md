@@ -69,3 +69,12 @@ Additional audit scope includes pre-authentication concurrency/memory, cancellat
 nonce lifecycle, oversized/chunked/compressed bodies, traffic binding and file-transfer
 limits. This document is a contract and an audit record, not a claim of complete
 security certification or a substitute for testing the installed versions.
+
+The encryptedhttp package exposes the same Conch crypto and bounded authentication
+middleware for application APIs. Every request uses a fresh client key; every
+server instance generates a fresh memory-only key with its replay tracker. It
+carries request method, path, content type and raw bytes inside encryption. Status,
+content type, body chunks and terminal completion are authenticated sequenced
+frames, including application errors and images. A failed handshake or uncertain
+mutation never authorizes a plaintext fallback or an automatic mutation replay.
+This library is not a new listener in Conch and does not activate Filo by itself.
