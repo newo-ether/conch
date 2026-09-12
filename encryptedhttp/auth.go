@@ -59,7 +59,10 @@ func AuthMiddleware(apiKey []byte, nonceTracker *crypto.NonceTracker) func(http.
 				http.Error(w, `{"error":"authentication readers are busy"}`, http.StatusTooManyRequests)
 				return
 			}
+			controller := http.NewResponseController(w)
+			_ = controller.SetReadDeadline(time.Now().Add(10 * time.Second))
 			bodyBytes, err := readAuthenticationBody(r.Body, readers)
+			_ = controller.SetReadDeadline(time.Time{})
 			if err != nil {
 				var maxBytesErr *http.MaxBytesError
 				if errors.As(err, &maxBytesErr) {
