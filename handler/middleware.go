@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/newo-ether/conch/crypto"
 )
@@ -15,7 +16,12 @@ import (
 // caller with forged auth headers from forcing an unbounded allocation.
 const MaxRequestBodyBytes int64 = 4 << 20
 
+const maxAuthenticatingRequests = 8
+
 func AuthMiddleware(apiKey []byte, nonceTracker *crypto.NonceTracker) func(http.Handler) http.Handler {
+	// Shared by every route wrapped with this middleware. Slow unauthenticated
+	// peers cannot each retain a complete request body without an aggregate bound.
+	readers := make(chan struct{}, maxAuthenticatingRequests)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
@@ -23,6 +29,10 @@ func AuthMiddleware(apiKey []byte, nonceTracker *crypto.NonceTracker) func(http.
 			// If no API key is configured, still enforce the global request-body limit.
 			if len(apiKey) == 0 {
 				next.ServeHTTP(w, r)
+				return
+			}
+			if r.ContentLength > MaxRequestBodyBytes {
+				http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
 				return
 			}
 
@@ -36,23 +46,26 @@ func AuthMiddleware(apiKey []byte, nonceTracker *crypto.NonceTracker) func(http.
 			// 2. Verify timestamp.
 			tsStr := r.Header.Get("X-Timestamp")
 			ts, err := strconv.ParseInt(tsStr, 10, 64)
-			if err != nil {
+			now := time.Now().Unix()
+			if err != nil || ts < now-300 || ts > now+300 {
 				writeAuthError(w)
 				return
 			}
 
 			// 3. Read the bounded body for SHA-256, then reset it for the downstream handler.
-			bodyBytes, err := io.ReadAll(r.Body)
+			select {
+			case readers <- struct{}{}:
+			default:
+				http.Error(w, `{"error":"authentication readers are busy"}`, http.StatusTooManyRequests)
+				return
+			}
+			bodyBytes, err := readAuthenticationBody(r.Body, readers)
 			if err != nil {
 				var maxBytesErr *http.MaxBytesError
 				if errors.As(err, &maxBytesErr) {
 					http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
 					return
 				}
-				writeAuthError(w)
-				return
-			}
-			if err := r.Body.Close(); err != nil {
 				writeAuthError(w)
 				return
 			}
@@ -64,7 +77,7 @@ func AuthMiddleware(apiKey []byte, nonceTracker *crypto.NonceTracker) func(http.
 			clientPubKey := r.Header.Get("X-Client-Public-Key")
 
 			// 5. Verify signature (covers all request fields including client public key).
-			if !crypto.Verify(apiKey, tsStr, r.Method, r.URL.Path, bodySHA256, nonceHMAC, clientPubKey, sigHeader) {
+			if !crypto.Verify(apiKey, tsStr, r.Method, r.URL.RequestURI(), bodySHA256, nonceHMAC, clientPubKey, sigHeader) {
 				writeAuthError(w)
 				return
 			}
@@ -78,6 +91,16 @@ func AuthMiddleware(apiKey []byte, nonceTracker *crypto.NonceTracker) func(http.
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func readAuthenticationBody(body io.ReadCloser, readers chan struct{}) ([]byte, error) {
+	defer func() { <-readers }()
+	data, err := io.ReadAll(body)
+	closeErr := body.Close()
+	if err != nil {
+		return nil, err
+	}
+	return data, closeErr
 }
 
 func writeAuthError(w http.ResponseWriter) {
