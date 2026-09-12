@@ -72,10 +72,6 @@ func signedPublicKeyHandler(
 			return
 		}
 		publicKey := keyPair.PublicKeyBase64()
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"public_key": publicKey,
-			"nonce":      nonce,
-			"signature":  conchcrypto.SignPayload(apiKey, nonce, publicKey),
-		})
+		_ = json.NewEncoder(w).Encode(conchcrypto.SignHandshake(apiKey, publicKey, nonce, r.URL.Query().Get("challenge")))
 	}
 }

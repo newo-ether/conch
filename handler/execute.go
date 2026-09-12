@@ -39,7 +39,7 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var aesKey []byte
 
 	// Detect encryption
-	if r.Header.Get("X-Encryption") == "v1" {
+	if r.Header.Get("X-Encryption") == "v1" || r.Header.Get("X-Encryption") == "v2" {
 		clientPubKeyStr := r.Header.Get("X-Client-Public-Key")
 		if clientPubKeyStr == "" {
 			http.Error(w, `{"error":"missing client public key"}`, http.StatusBadRequest)
@@ -51,7 +51,7 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"invalid client public key"}`, http.StatusBadRequest)
 			return
 		}
-		aesKey, err = crypto.DeriveSharedSecret(h.KeyPair.PrivateKey, clientPubKey)
+		aesKey, err = crypto.DeriveRequestKey(h.KeyPair.PrivateKey, clientPubKey, r.Header.Get("X-Encryption"))
 		if err != nil {
 			log.Printf("ERROR: key derivation failed: %v", err)
 			http.Error(w, `{"error":"key derivation failed"}`, http.StatusInternalServerError)
@@ -61,7 +61,7 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		plaintext, err := crypto.Decrypt(aesKey, string(bodyBytes))
 		if err != nil {
 			log.Printf("ERROR: decryption failed: %v", err)
-			http.Error(w, `{"error":"decryption failed"}`, http.StatusBadRequest)
+			writePreDispatchError(w, r, h.APIKey, "decryption failed")
 			return
 		}
 		if err := json.Unmarshal(plaintext, &req); err != nil {
@@ -91,6 +91,7 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	events := h.Executor.Execute(r.Context(), req)
 	responseController := http.NewResponseController(w)
+	var sequence uint64
 
 	for evt := range events {
 		var eventName string
@@ -127,18 +128,19 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			log.Printf("ERROR: setting SSE write deadline: %v", err)
 			return
 		}
-		if err := writeSSE(w, eventName, payload, aesKey); err != nil {
+		if err := writeSSE(w, eventName, payload, aesKey, sequence); err != nil {
 			log.Printf("ERROR: writing SSE event: %v", err)
 			return
 		}
 		flusher.Flush()
+		sequence++
 	}
 }
 
-func writeSSE(w io.Writer, event, payload string, aesKey []byte) error {
+func writeSSE(w io.Writer, event, payload string, aesKey []byte, sequence uint64) error {
 	var data string
 	if aesKey != nil {
-		encrypted, err := crypto.Encrypt(aesKey, []byte(payload))
+		encrypted, err := crypto.EncryptEvent(aesKey, event, sequence, []byte(payload))
 		if err != nil {
 			return fmt.Errorf("encrypt SSE event: %w", err)
 		}

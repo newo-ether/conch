@@ -37,11 +37,7 @@ func TestTransportRecoversWhenServerComesOnlineAfterStartup(t *testing.T) {
 			return
 		}
 		publicKey := keyPair.PublicKeyBase64()
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"public_key": publicKey,
-			"nonce":      nonce,
-			"signature":  conchcrypto.SignPayload([]byte(apiKey), nonce, publicKey),
-		})
+		_ = json.NewEncoder(w).Encode(conchcrypto.SignHandshake([]byte(apiKey), publicKey, nonce, r.URL.Query().Get("challenge")))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -91,11 +87,7 @@ func TestTransportRefreshesRotatedServerKeyBeforeRetryingSafeEdit(t *testing.T) 
 			return
 		}
 		publicKey := currentKey.PublicKeyBase64()
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"public_key": publicKey,
-			"nonce":      nonce,
-			"signature":  conchcrypto.SignPayload([]byte(apiKey), nonce, publicKey),
-		})
+		_ = json.NewEncoder(w).Encode(conchcrypto.SignHandshake([]byte(apiKey), publicKey, nonce, r.URL.Query().Get("challenge")))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -154,11 +146,7 @@ func TestTransportFileEditPreservesLargeFileTailOverEncryptedProtocol(t *testing
 			return
 		}
 		publicKey := keyPair.PublicKeyBase64()
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"public_key": publicKey,
-			"nonce":      nonce,
-			"signature":  conchcrypto.SignPayload([]byte(apiKey), nonce, publicKey),
-		})
+		_ = json.NewEncoder(w).Encode(conchcrypto.SignHandshake([]byte(apiKey), publicKey, nonce, r.URL.Query().Get("challenge")))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()

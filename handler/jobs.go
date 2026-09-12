@@ -29,7 +29,7 @@ func (h *JobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
+		writePreDispatchError(w, r, h.APIKey, err.Error())
 		return
 	}
 

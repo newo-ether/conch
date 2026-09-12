@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -100,21 +99,7 @@ func main() {
 	mux.Handle("POST /file/grep", auth(fileGrepHandler))
 	mux.HandleFunc("GET /health", handler.HealthHandler)
 	mux.HandleFunc("GET /version", handler.VersionHandler)
-	mux.HandleFunc("GET /public-key", func(w http.ResponseWriter, r *http.Request) {
-		nonce, err := crypto.GenerateNonce()
-		if err != nil {
-			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-			return
-		}
-		pubKey := keyPair.PublicKeyBase64()
-		sig := crypto.SignPayload(apiKeyBytes, nonce, pubKey)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"public_key": pubKey,
-			"nonce":      nonce,
-			"signature":  sig,
-		})
-	})
+	mux.HandleFunc("GET /public-key", handler.PublicKeyHandler(apiKeyBytes, keyPair))
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),

@@ -54,11 +54,7 @@ func TestFileReadResultCarriesContentWithoutStructuredContent(t *testing.T) {
 			http.Error(w, "nonce generation failed", http.StatusInternalServerError)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"public_key": fileHandler.KeyPair.PublicKeyBase64(),
-			"nonce":      nonce,
-			"signature":  conchcrypto.SignPayload([]byte(apiKey), nonce, fileHandler.KeyPair.PublicKeyBase64()),
-		})
+		_ = json.NewEncoder(w).Encode(conchcrypto.SignHandshake([]byte(apiKey), fileHandler.KeyPair.PublicKeyBase64(), nonce, r.URL.Query().Get("challenge")))
 	})
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(buildinfo.Current("conch"))

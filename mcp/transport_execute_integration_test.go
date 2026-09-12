@@ -40,11 +40,7 @@ func TestTransportRefreshesRotatedKeyWithoutDuplicateCommandExecution(t *testing
 			return
 		}
 		publicKey := currentKey.PublicKeyBase64()
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"public_key": publicKey,
-			"nonce":      nonce,
-			"signature":  conchcrypto.SignPayload([]byte(apiKey), nonce, publicKey),
-		})
+		_ = json.NewEncoder(w).Encode(conchcrypto.SignHandshake([]byte(apiKey), publicKey, nonce, r.URL.Query().Get("challenge")))
 	})
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(buildinfo.Current("conch"))
@@ -107,11 +103,7 @@ func TestTransportExecuteUsesCallDeadlineInsteadOfControlClientTimeout(t *testin
 			return
 		}
 		publicKey := keyPair.PublicKeyBase64()
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"public_key": publicKey,
-			"nonce":      nonce,
-			"signature":  conchcrypto.SignPayload([]byte(apiKey), nonce, publicKey),
-		})
+		_ = json.NewEncoder(w).Encode(conchcrypto.SignHandshake([]byte(apiKey), publicKey, nonce, r.URL.Query().Get("challenge")))
 	})
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(buildinfo.Current("conch"))
@@ -158,6 +150,8 @@ func TestTransportExecuteHonorsEarlierCallerCancellation(t *testing.T) {
 			return nil, request.Context().Err()
 		}),
 	}
+	// Cancellation bounds both the fresh security preflight and execution.
+	transport.client = transport.executeClient
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()

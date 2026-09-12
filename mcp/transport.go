@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -47,10 +48,15 @@ func NewTransport(serverURL, apiKey string) *Transport {
 		serverURL: serverURL,
 		apiKey:    []byte(apiKey),
 		client: &http.Client{
-			Timeout: 130 * time.Second, // bounds initialization and control/file requests
+			Timeout:       130 * time.Second, // bounds initialization and control/file requests
+			CheckRedirect: rejectRedirect,
 		},
-		executeClient: &http.Client{},
+		executeClient: &http.Client{CheckRedirect: rejectRedirect},
 	}
+}
+
+func rejectRedirect(_ *http.Request, _ []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 // Initialize fetches and verifies the server's public key. Calls are serialized so offline
@@ -75,7 +81,11 @@ func (t *Transport) initialize(ctx context.Context) error {
 		return fmt.Errorf("API key is required")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", t.serverURL+"/public-key", nil)
+	challenge, err := crypto.GenerateNonce()
+	if err != nil {
+		return fmt.Errorf("handshake challenge: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", t.serverURL+"/public-key?challenge="+url.QueryEscape(challenge), nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -94,11 +104,7 @@ func (t *Transport) initialize(ctx context.Context) error {
 		return &serverHTTPError{statusCode: resp.StatusCode, body: string(body)}
 	}
 
-	var result struct {
-		PublicKey string `json:"public_key"`
-		Nonce     string `json:"nonce"`
-		Signature string `json:"signature"`
-	}
+	var result crypto.Handshake
 	if err := json.Unmarshal(body, &result); err != nil {
 		return fmt.Errorf("parse public key response: %w", err)
 	}
@@ -108,6 +114,9 @@ func (t *Transport) initialize(ctx context.Context) error {
 
 	if !crypto.VerifyPayload(t.apiKey, result.Nonce, result.PublicKey, result.Signature) {
 		return fmt.Errorf("public key signature verification failed — API keys may not match")
+	}
+	if !crypto.VerifyHandshakeSecurity(t.apiKey, result, challenge) {
+		return fmt.Errorf("server lacks authenticated security capabilities; update Conch before sending requests")
 	}
 
 	pubKey, err := crypto.DecodePublicKey(result.PublicKey)
@@ -215,8 +224,9 @@ func (t *Transport) fetchServerMetadata(ctx context.Context) (buildinfo.Metadata
 }
 
 type serverHTTPError struct {
-	statusCode int
-	body       string
+	statusCode             int
+	body                   string
+	authenticatedRejection bool
 }
 
 func (e *serverHTTPError) Error() string {
@@ -228,11 +238,12 @@ func isStaleServerKeyError(err error) bool {
 	if err == nil || !errors.As(err, &responseError) || responseError.statusCode != http.StatusBadRequest {
 		return false
 	}
-	return strings.Contains(strings.ToLower(responseError.body), "decryption failed")
+	return responseError.authenticatedRejection &&
+		strings.Contains(strings.ToLower(responseError.body), "decryption failed")
 }
 
-// Execute sends an encrypted command and returns the shell output. It retries only after an
-// explicit server-side decryption rejection, which is known to happen before command execution.
+// Execute refreshes the authenticated server key before sending exactly once.
+// A restarted server cannot attest that an earlier generation did not execute.
 func (t *Transport) Execute(
 	ctx context.Context,
 	command string,
@@ -248,10 +259,6 @@ func (t *Transport) Execute(
 	executeCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
-	events, err = t.executeOnce(executeCtx, command, timeoutMs, workdir)
-	if !isStaleServerKeyError(err) {
-		return events, err
-	}
 	if err = t.Initialize(executeCtx); err != nil {
 		return nil, fmt.Errorf("refresh server key: %w", err)
 	}
@@ -312,7 +319,7 @@ func (t *Transport) executeOnce(ctx context.Context, command string, timeoutMs i
 	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", timestamp))
 	req.Header.Set("X-Signature", signature)
 	req.Header.Set("X-Nonce", nonce)
-	req.Header.Set("X-Encryption", "v1")
+	req.Header.Set("X-Encryption", "v2")
 	req.Header.Set("X-Client-Public-Key", clientPubKey)
 
 	resp, err := t.executeClient.Do(req)
@@ -326,7 +333,7 @@ func (t *Transport) executeOnce(ctx context.Context, command string, timeoutMs i
 		if readErr != nil {
 			return nil, fmt.Errorf("read execute error response: %w", readErr)
 		}
-		return nil, &serverHTTPError{statusCode: resp.StatusCode, body: string(body)}
+		return nil, authenticatedHTTPError(t.apiKey, req, resp, body)
 	}
 
 	return parseSSE(resp.Body, aesKey)
@@ -650,8 +657,8 @@ func (t *Transport) FileGrep(
 	return result.Matches, result.Truncated, nil
 }
 
-// doFileRequest sends an encrypted JSON request. A retry is permitted only for an explicit
-// decryption rejection, which the server emits before dispatching the requested operation.
+// Only read operations may retry after authenticated stale-key rejection.
+// Mutations refresh first and never replay after transmission.
 func (t *Transport) doFileRequest(
 	ctx context.Context,
 	path string,
@@ -659,6 +666,12 @@ func (t *Transport) doFileRequest(
 	result any,
 ) (err error) {
 	defer func() { t.recordOperation(err) }()
+	if !readOnlyRequest(path) {
+		if err = t.Initialize(ctx); err != nil {
+			return fmt.Errorf("refresh server key: %w", err)
+		}
+		return t.doFileRequestOnce(ctx, path, payload, result)
+	}
 	err = t.doFileRequestOnce(ctx, path, payload, result)
 	if !isStaleServerKeyError(err) {
 		return err
@@ -667,6 +680,15 @@ func (t *Transport) doFileRequest(
 		return fmt.Errorf("refresh server key: %w", err)
 	}
 	return t.doFileRequestOnce(ctx, path, payload, result)
+}
+
+func readOnlyRequest(path string) bool {
+	switch path {
+	case "/file/read", "/file/image", "/file/glob", "/file/grep", "/jobs/get", "/jobs/list":
+		return true
+	default:
+		return false
+	}
 }
 
 func (t *Transport) doFileRequestOnce(ctx context.Context, path string, payload []byte, result any) error {
@@ -709,7 +731,7 @@ func (t *Transport) doFileRequestOnce(ctx context.Context, path string, payload 
 	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", timestamp))
 	req.Header.Set("X-Signature", signature)
 	req.Header.Set("X-Nonce", nonce)
-	req.Header.Set("X-Encryption", "v1")
+	req.Header.Set("X-Encryption", "v2")
 	req.Header.Set("X-Client-Public-Key", clientPubKey)
 
 	resp, err := t.client.Do(req)
@@ -728,9 +750,12 @@ func (t *Transport) doFileRequestOnce(ctx context.Context, path string, payload 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return &serverHTTPError{statusCode: resp.StatusCode, body: string(respBody)}
+		return authenticatedHTTPError(t.apiKey, req, resp, respBody)
 	}
 
+	if !crypto.VerifyResponseSignature(aesKey, resp.StatusCode, respBody, resp.Header.Get(crypto.ResponseSignatureHeader)) {
+		return fmt.Errorf("response authentication failed")
+	}
 	plaintext, err := crypto.Decrypt(aesKey, string(respBody))
 	if err != nil {
 		return fmt.Errorf("decrypt response: %w", err)
@@ -769,6 +794,7 @@ func parseSSE(r io.Reader, aesKey []byte) ([]LineEvent, error) {
 	terminalSeen := false
 	retainedBytes := 0
 	outputTruncated := false
+	var sequence uint64
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineBytes)
 
@@ -798,13 +824,14 @@ func parseSSE(r io.Reader, aesKey []byte) ([]LineEvent, error) {
 		var payload []byte
 		if aesKey != nil {
 			var err error
-			payload, err = crypto.Decrypt(aesKey, data)
+			payload, err = crypto.DecryptEvent(aesKey, currentEvent, sequence, data)
 			if err != nil {
 				return nil, fmt.Errorf("decrypt SSE %s event: %w", currentEvent, err)
 			}
 		} else {
 			payload = []byte(data)
 		}
+		sequence++
 
 		switch currentEvent {
 		case "line":

@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"crypto/ecdh"
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -51,7 +52,27 @@ func DeriveSharedSecret(ourPriv *ecdh.PrivateKey, theirPub *ecdh.PublicKey) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("ECDH: %w", err)
 	}
+	return hkdf.Key(sha256.New, shared, nil, "conch-agora-v2", 32)
+}
+
+// Legacy derivation is accepted only for explicitly versioned old client requests
+// during server-first updates. Current clients never fall back to it.
+func DeriveLegacySharedSecret(ourPriv *ecdh.PrivateKey, theirPub *ecdh.PublicKey) ([]byte, error) {
+	shared, err := ourPriv.ECDH(theirPub)
+	if err != nil {
+		return nil, fmt.Errorf("ECDH: %w", err)
+	}
 	return hkdfExpand(shared, []byte("conch-agora-v1"), 32), nil
+}
+
+func DeriveRequestKey(ourPriv *ecdh.PrivateKey, theirPub *ecdh.PublicKey, mode string) ([]byte, error) {
+	if mode == "v2" {
+		return DeriveSharedSecret(ourPriv, theirPub)
+	}
+	if mode == "v1" {
+		return DeriveLegacySharedSecret(ourPriv, theirPub)
+	}
+	return nil, fmt.Errorf("unsupported encryption mode")
 }
 
 // hkdfExpand is HKDF-Expand per RFC 5869 (HMAC-SHA256).

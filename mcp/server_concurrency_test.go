@@ -37,11 +37,7 @@ func TestServerProcessesConcurrentRequestsAndCancellation(t *testing.T) {
 			return
 		}
 		publicKey := keyPair.PublicKeyBase64()
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"public_key": publicKey,
-			"nonce":      nonce,
-			"signature":  conchcrypto.SignPayload([]byte(apiKey), nonce, publicKey),
-		})
+		_ = json.NewEncoder(w).Encode(conchcrypto.SignHandshake([]byte(apiKey), publicKey, nonce, r.URL.Query().Get("challenge")))
 	})
 	httpServer := httptest.NewServer(mux)
 	defer httpServer.Close()

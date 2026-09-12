@@ -125,7 +125,7 @@ func decryptBody(r *http.Request, bodyBytes []byte, apiKey []byte, keyPair *cryp
 	var aesKey []byte
 	var plaintext []byte
 
-	if r.Header.Get("X-Encryption") == "v1" {
+	if r.Header.Get("X-Encryption") == "v1" || r.Header.Get("X-Encryption") == "v2" {
 		clientPubKeyStr := r.Header.Get("X-Client-Public-Key")
 		if clientPubKeyStr == "" {
 			return nil, nil, fmt.Errorf("missing client public key")
@@ -134,7 +134,7 @@ func decryptBody(r *http.Request, bodyBytes []byte, apiKey []byte, keyPair *cryp
 		if err != nil {
 			return nil, nil, fmt.Errorf("invalid client public key: %w", err)
 		}
-		aesKey, err = crypto.DeriveSharedSecret(keyPair.PrivateKey, clientPubKey)
+		aesKey, err = crypto.DeriveRequestKey(keyPair.PrivateKey, clientPubKey, r.Header.Get("X-Encryption"))
 		if err != nil {
 			return nil, nil, fmt.Errorf("key derivation failed: %w", err)
 		}
@@ -170,6 +170,7 @@ func writeJSONResponseStatus(w http.ResponseWriter, status int, v any, aesKey []
 			return
 		}
 		body = enc
+		w.Header().Set(crypto.ResponseSignatureHeader, crypto.ResponseSignature(aesKey, status, []byte(body)))
 	} else {
 		body = string(data)
 	}
@@ -194,7 +195,7 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
+		writePreDispatchError(w, r, h.APIKey, err.Error())
 		return
 	}
 
@@ -327,7 +328,7 @@ func (h *FileImageHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
+		writePreDispatchError(w, r, h.APIKey, err.Error())
 		return
 	}
 
@@ -403,7 +404,7 @@ func (h *FileWriteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
+		writePreDispatchError(w, r, h.APIKey, err.Error())
 		return
 	}
 
@@ -547,7 +548,7 @@ func (h *FileEditHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
+		writePreDispatchError(w, r, h.APIKey, err.Error())
 		return
 	}
 
@@ -670,7 +671,7 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
+		writePreDispatchError(w, r, h.APIKey, err.Error())
 		return
 	}
 
@@ -773,7 +774,7 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, aesKey, err := decryptBody(r, bodyBytes, h.APIKey, h.KeyPair)
 	if err != nil {
-		writeJSONResponseStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()}, aesKey)
+		writePreDispatchError(w, r, h.APIKey, err.Error())
 		return
 	}
 
