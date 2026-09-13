@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.18] - 2026-09-13
+
+### Security
+
+- Authenticate fresh server handshakes, bind signed responses to the request and
+  HTTP status, and reject reflected, forged or unsigned responses.
+- Prevent mutation replay after network failures, key changes and server restarts;
+  require sequenced, authenticated terminal events for streamed operations.
+- Bound unauthenticated request readers, concurrency, slow bodies and memory use;
+  reject expired requests and authenticated transport redirects.
+- Restrict Windows service credential files, backups and secret-bearing registry
+  keys to Administrators and SYSTEM while preserving existing key bytes.
+
+### Added
+
+- Expose the shared encrypted HTTP gateway and Go client used by Filo for bounded,
+  authenticated requests, responses, errors, streams, images and file transfers.
+- Document the release-to-installation verification contract in RELEASING.md.
+
+### Upgrade
+
+- Upgrade Conch servers before upgrading their MCP clients. Current clients require
+  the authenticated security capabilities and do not downgrade to older servers.
+- Existing API keys and service settings are retained. Old clients connecting to a
+  new server do not automatically acquire the new client-side security guarantees.
+- This is the first formal release of the security changes previously deployed as
+  an unpublished v1.0.17+f7edc900 build.
+
+### Verification
+
+- Regression coverage includes handshake tampering, response reflection, restart
+  replay, sequenced streams, authenticated HTTP APIs and slow-reader limits.
+- Release qualification includes Linux and Windows tests, race detection, vet,
+  repeated shell/handler/MCP tests, installer checks, deterministic six-target
+  builds, downloaded checksums and provenance, followed by installed-version checks.
 ## [1.0.17] - 2026-08-28
 
 ### Fixed
@@ -104,7 +139,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.17...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.18...HEAD
+[1.0.18]: https://github.com/newo-ether/conch/compare/v1.0.17...v1.0.18
 [1.0.17]: https://github.com/newo-ether/conch/compare/v1.0.16...v1.0.17
 [1.0.16]: https://github.com/newo-ether/conch/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/newo-ether/conch/compare/v1.0.14...v1.0.15
