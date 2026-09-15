@@ -12,18 +12,24 @@ A lightweight, zero-dependency shell execution server with SSE streaming and end
 - **Rate limiting** — per-IP token bucket (20 req/s sustained, burst 40)
 - **Single binary** — zero dependencies, statically linked, ~8 MiB
 - **Cross-platform** — Linux (arm64/amd64), Windows (amd64), Termux on Android
-- **System service** — installs as systemd (Linux), runit (Termux), or nssm (Windows)
+- **Managed background service** — system or per-user systemd (Linux), runit (Termux), nssm or a per-user Scheduled Task (Windows)
 - **MCP support** — separate `conch-mcp` binary bridges Claude Desktop (stdio/JSON-RPC) to a remote Conch server
 
 ## Installation
 
-### One-click (recommended)
+The installers auto-detect the platform, download pre-built binaries from GitHub Releases, verify every download against `checksums.txt`, and generate an API key for a new install. A new Linux or Windows installation defaults to least-privilege `user` mode. When exactly one existing mode is detected, rerunning without a mode automatically updates that same mode while preserving the API key, configuration, durable jobs, service identity, and rollback binaries; use `--version vX.Y.Z` / `-Version vX.Y.Z` to pin a release.
 
-The script auto-detects your platform, downloads pre-built binaries from GitHub Releases, verifies every download against `checksums.txt`, generates an API key for a new install, and registers a system service. Re-running it performs an in-place upgrade that preserves the API key, configuration, durable jobs, and rollback binaries; use `--version vX.Y.Z` / `-Version vX.Y.Z` to pin a release.
+Linux and Windows support two deliberately isolated modes:
 
-**Linux:**
+- `user` (default for a new installation): a systemd user service or Windows Scheduled Task owned by the current user; no administrator/root access is required. It starts at login. On Linux, starting before login requires the administrator to explicitly enable linger.
+- `system` (explicit): a machine-wide systemd or Windows service; administrator/root access is required.
+- Updates automatically retain the one detected existing mode. An installer will not silently migrate between modes. If both modes exist or an existing custom prefix is ambiguous, specify the mode explicitly.
+
+### Default per-user install
+
+**Linux (no sudo):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.sh | bash
 ```
 
 **Termux (Android):**
@@ -31,22 +37,63 @@ curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/insta
 curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.sh | bash
 ```
 
-**Windows (PowerShell as Administrator):**
+**Windows (ordinary PowerShell):**
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.ps1 | iex
 ```
 
-Custom options:
+### Explicit system install
+
+**Linux:**
 ```bash
-# Linux
-sudo ./scripts/install.sh --version v1.0.9 --port 14216 --api-key "your-key"
+curl -fsSL https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.sh | sudo bash -s -- --mode system
+```
+
+**Windows (PowerShell as Administrator):**
+```powershell
+irm https://raw.githubusercontent.com/newo-ether/conch/main/scripts/install.ps1 -OutFile "$env:TEMP\install-conch.ps1"
+& "$env:TEMP\install-conch.ps1" -Mode system
+Remove-Item -LiteralPath "$env:TEMP\install-conch.ps1"
+```
+
+### Custom options
+
+```bash
+# Linux system mode
+sudo ./scripts/install.sh --mode system --version v1.0.19 --port 14216 --api-key "your-key"
+
+# Linux user mode
+./scripts/install.sh --mode user --version v1.0.19 --port 14216 --api-key "your-key"
 
 # Termux
 ./scripts/install.sh --port 8080
-
-# Windows
-.\scripts\install.ps1 -Version v1.0.9 -Port 14216 -ApiKey "your-key"
 ```
+
+```powershell
+# Windows system mode (run as Administrator)
+.\scripts\install.ps1 -Mode system -Version v1.0.19 -Port 14216 -ApiKey "your-key"
+
+# Windows user mode
+.\scripts\install.ps1 -Mode user -Version v1.0.19 -Port 14216 -ApiKey "your-key"
+```
+
+### Uninstall or change modes
+
+Uninstall only the intended mode. If both modes are present, the mode is mandatory; a custom prefix also requires an explicit mode.
+
+```bash
+# Linux
+sudo ./scripts/install.sh --uninstall --mode system
+./scripts/install.sh --uninstall --mode user
+```
+
+```powershell
+# Windows
+.\scripts\install.ps1 -Uninstall -Mode system   # Administrator
+.\scripts\install.ps1 -Uninstall -Mode user
+```
+
+To change modes, uninstall the current mode first and then run the installer with the new mode.
 
 ### From source (manual)
 
@@ -77,8 +124,8 @@ Binaries land in `build/`.
 export CONCH_API_KEY="your-secret-key"
 ./conch
 
-# Or with the installer
-sudo ./scripts/install.sh --api-key "your-secret-key"
+# Or with the default per-user installer
+./scripts/install.sh --api-key "your-secret-key"
 ```
 
 Test:

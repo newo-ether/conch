@@ -224,6 +224,7 @@ DO_UNINSTALL=false
 YES_ALL=false
 INSTALL_PREFIX=""
 RELEASE_VERSION="${DEFAULT_RELEASE_VERSION}"
+MODE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -257,6 +258,9 @@ while [ $# -gt 0 ]; do
             RELEASE_VERSION="$2"; shift 2 ;;
         --no-start)      NO_START=true; shift ;;
         --uninstall)     DO_UNINSTALL=true; shift ;;
+        --mode)
+            [ $# -ge 2 ] || die "--mode requires a value"
+            MODE="$2"; shift 2 ;;
         -y|--yes)        YES_ALL=true; shift ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
@@ -271,7 +275,8 @@ while [ $# -gt 0 ]; do
             echo "  --mcp-bin PATH     Use pre-built MCP binary"
             echo "  --version VERSION  Pin GitHub release (for example v1.0.9)"
             echo "  --no-start         Install but don't start"
-            echo "  --uninstall        Remove service and binary"
+            echo "  --uninstall        Remove one selected installation mode"
+            echo "  --mode MODE        user (default for new installs) or system (machine-wide systemd)"
             echo "  -y, --yes          Skip prompts, use defaults"
             exit 0
             ;;
@@ -304,10 +309,73 @@ for path_value in "$INSTALL_PREFIX" "$SRC_BIN" "$SRC_MCP"; do
     [[ "$path_value" != *$'\n'* && "$path_value" != *$'\r'* && "$path_value" != *"'"* ]] ||
         die "Installer paths must not contain newlines or apostrophes"
 done
+case "$MODE" in
+    ""|system|user) ;;
+    *) die "Invalid --mode '$MODE' (expected system or user)" ;;
+esac
+
 if [ "$RELEASE_VERSION" = "latest" ]; then
     GITHUB_RELEASES="https://github.com/newo-ether/conch/releases/latest/download"
 else
     GITHUB_RELEASES="https://github.com/newo-ether/conch/releases/download/${RELEASE_VERSION}"
+fi
+
+# ============================================================================
+# Install mode resolution (system service vs per-user service)
+# ============================================================================
+select_install_mode() {
+    local requested="$1"
+    local for_uninstall="$2"
+    local has_custom_prefix="$3"
+    local custom_prefix_exists="$4"
+    local system_present="$5"
+    local user_present="$6"
+
+    if [ -n "$requested" ]; then
+        SELECTED_MODE="$requested"
+        return
+    fi
+    if $for_uninstall && $has_custom_prefix; then
+        die "Specify --mode system or --mode user when uninstalling a custom --prefix."
+    fi
+    if $system_present && $user_present; then
+        die "Both system and user installations exist. Specify --mode system or --mode user."
+    fi
+    if $system_present; then
+        SELECTED_MODE="system"
+        return
+    fi
+    if $user_present; then
+        SELECTED_MODE="user"
+        return
+    fi
+    if ! $for_uninstall && $has_custom_prefix && $custom_prefix_exists; then
+        die "The custom --prefix already exists but its installation mode cannot be identified. Specify --mode system or --mode user."
+    fi
+
+    # New installations default to least-privilege user mode.
+    SELECTED_MODE="user"
+}
+
+if [ "$PLATFORM" = "termux" ]; then
+    MODE="user"
+elif [ -z "$MODE" ]; then
+    system_present=false
+    user_present=false
+    { [ -f /etc/systemd/system/conch.service ] ||
+      [ -f /usr/local/bin/conch ] || [ -d /etc/conch ]; } && system_present=true
+    { [ -f "${HOME}/.config/systemd/user/conch.service" ] ||
+      [ -f "${HOME}/.local/bin/conch" ] || [ -d "${HOME}/.config/conch" ]; } && user_present=true
+    has_custom_prefix=false
+    custom_prefix_exists=false
+    [ -n "$INSTALL_PREFIX" ] && has_custom_prefix=true
+    [ -n "$INSTALL_PREFIX" ] && [ -e "$INSTALL_PREFIX" ] && custom_prefix_exists=true
+
+    SELECTED_MODE=""
+    select_install_mode \
+        "$MODE" "$DO_UNINSTALL" "$has_custom_prefix" "$custom_prefix_exists" \
+        "$system_present" "$user_present"
+    MODE="$SELECTED_MODE"
 fi
 
 # ============================================================================
@@ -323,12 +391,17 @@ if [ -z "${INSTALL_PREFIX}" ]; then
         CFG_DIR="${PREFIX}/etc/conch"
         SVC_DIR="${PREFIX}/var/service/conch"
         # $HOME may be wrong under sudo; derive from PREFIX
-    termux_home="${HOME}"
-    if [ -n "${PREFIX:-}" ]; then termux_home="$(dirname "$PREFIX")/home"; fi
-    BOOT_DIR="${termux_home}/.termux/boot"
+        termux_home="${HOME}"
+        if [ -n "${PREFIX:-}" ]; then termux_home="$(dirname "$PREFIX")/home"; fi
+        BOOT_DIR="${termux_home}/.termux/boot"
     else
-        BIN_DIR="/usr/local/bin"
-        CFG_DIR="/etc/conch"
+        if [ "$MODE" = "user" ]; then
+            BIN_DIR="${HOME}/.local/bin"
+            CFG_DIR="${HOME}/.config/conch"
+        else
+            BIN_DIR="/usr/local/bin"
+            CFG_DIR="/etc/conch"
+        fi
     fi
 else
     BIN_DIR="${INSTALL_PREFIX}"
@@ -341,6 +414,29 @@ fi
 BIN_PATH="${BIN_DIR}/conch"
 MCP_BIN_PATH="${BIN_DIR}/conch-mcp"
 ENV_FILE="${CFG_DIR}/env"
+
+# Rollback commands are evaluated later, so reject path forms that cannot be
+# represented safely by the single-quoted rollback entries below.
+for managed_path in "$BIN_DIR" "$CFG_DIR" "${SVC_DIR:-}"; do
+    [[ "$managed_path" != *$'\n'* && "$managed_path" != *$'\r'* &&
+       "$managed_path" != *"'"* ]] ||
+        die "Managed install paths must not contain newlines or apostrophes"
+done
+
+SYSTEM_MODE_PRESENT=false
+USER_MODE_PRESENT=false
+if [ "$PLATFORM" = "linux" ]; then
+    { [ -f /etc/systemd/system/conch.service ] ||
+      [ -f /usr/local/bin/conch ] || [ -d /etc/conch ]; } && SYSTEM_MODE_PRESENT=true
+    { [ -f "${HOME}/.config/systemd/user/conch.service" ] ||
+      [ -f "${HOME}/.local/bin/conch" ] || [ -d "${HOME}/.config/conch" ]; } && USER_MODE_PRESENT=true
+    if ! $DO_UNINSTALL && [ "$MODE" = "user" ] && $SYSTEM_MODE_PRESENT; then
+        die "A system-mode Conch installation exists. Refusing an implicit migration; uninstall it with --uninstall --mode system first."
+    fi
+    if ! $DO_UNINSTALL && [ "$MODE" = "system" ] && $USER_MODE_PRESENT; then
+        die "A user-mode Conch installation exists. Refusing an implicit migration; uninstall it with --uninstall --mode user first."
+    fi
+fi
 
 # Download names
 if [ "$PLATFORM" = "termux" ] || [ "$ARCH" = "arm64" ]; then
@@ -358,7 +454,8 @@ if [ -f "$0" ] && [ "$(basename "$0")" != "bash" ]; then
 else
     REPO_IS_TEMP=true
     REPO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/conch-install.XXXXXX")"
-    push_rollback "rm -rf $REPO_DIR"
+    printf -v repo_cleanup 'rm -rf -- %q' "$REPO_DIR"
+    push_rollback "$repo_cleanup"
 fi
 
 # ============================================================================
@@ -380,14 +477,25 @@ step $STEP $TOTAL_STEPS "Checking environment..."
 ok "OS: $(uname -s) $(uname -r)"
 ok "Arch: ${ARCH} (platform: ${PLATFORM})"
 
-# --- Root check (Linux only) ---
-if [ "$PLATFORM" = "linux" ] && [ "$(id -u)" -ne 0 ]; then
-    if $DO_UNINSTALL; then
-        die "Uninstall requires root. Run: sudo $0 --uninstall"
-    fi
-    die "Root privileges required. Run: sudo $0"
+# --- Identity check (Linux only) ---
+if [ "$PLATFORM" = "linux" ] && [ "$MODE" = "user" ] && [ "$(id -u)" -eq 0 ]; then
+    die "User mode must run as the target user, without sudo or a root shell."
 fi
-ok "$( [ "$PLATFORM" = "linux" ] && echo 'root' || echo 'termux user' )"
+if [ "$PLATFORM" = "linux" ] && [ "$MODE" = "system" ] && [ "$(id -u)" -ne 0 ]; then
+    if $DO_UNINSTALL; then
+        die "System-mode uninstall requires root. Run: sudo $0 --uninstall --mode system"
+    fi
+    die "System mode requires root. Run: sudo $0 --mode system"
+fi
+if [ "$PLATFORM" = "linux" ]; then
+    if [ "$MODE" = "user" ]; then
+        ok "user mode (no root required)"
+    else
+        ok "root"
+    fi
+else
+    ok "termux user"
+fi
 
 # --- Connectivity check ---
 if ! $DO_UNINSTALL && [ -z "${SRC_BIN}" ]; then
@@ -422,6 +530,16 @@ fi
 if [ "$PLATFORM" = "linux" ] && ! command -v systemctl &>/dev/null; then
     die "systemd required but not found. This script supports systemd-based Linux distributions."
 fi
+USER_SYSTEMD_AVAILABLE=true
+if [ "$PLATFORM" = "linux" ] && [ "$MODE" = "user" ] &&
+   ! systemctl --user show-environment >/dev/null 2>&1; then
+    if $DO_UNINSTALL; then
+        USER_SYSTEMD_AVAILABLE=false
+        warn "The systemd user manager is unavailable; removing the unit and files without contacting it."
+    else
+        die "The systemd user manager is unavailable. Run from a normal login session with user systemd support."
+    fi
+fi
 if [ "$PLATFORM" = "termux" ] && ! command -v sv &>/dev/null; then
     die "termux-services required. Run: pkg install termux-services"
 fi
@@ -432,11 +550,18 @@ STEP=$((STEP + 1))
 # Step 2 - Uninstall (if requested)
 # ============================================================================
 if $DO_UNINSTALL; then
-    step $STEP $TOTAL_STEPS "Uninstalling Conch..."
+    step $STEP $TOTAL_STEPS "Uninstalling Conch ($MODE mode)..."
 
     FOUND=false
+    if ! $YES_ALL; then
+        prompt "Remove the $MODE-mode Conch installation and its files?" "y" || {
+            info "Aborted by user."
+            exit 0
+        }
+    fi
 
-    if [ "$PLATFORM" = "linux" ] && [ -f /etc/systemd/system/conch.service ]; then
+    if [ "$PLATFORM" = "linux" ] && [ "$MODE" = "system" ] &&
+       [ -f /etc/systemd/system/conch.service ]; then
         FOUND=true
         info "Stopping and removing systemd service..."
         systemctl stop conch 2>/dev/null || true
@@ -446,14 +571,31 @@ if $DO_UNINSTALL; then
         ok "systemd service removed"
     fi
 
+    if [ "$PLATFORM" = "linux" ] && [ "$MODE" = "user" ] &&
+       [ -f "${HOME}/.config/systemd/user/conch.service" ]; then
+        FOUND=true
+        info "Stopping and removing systemd user service..."
+        if $USER_SYSTEMD_AVAILABLE; then
+            systemctl --user stop conch 2>/dev/null || true
+            systemctl --user disable conch 2>/dev/null || true
+        fi
+        rm -f "${HOME}/.config/systemd/user/conch.service"
+        if $USER_SYSTEMD_AVAILABLE; then
+            systemctl --user daemon-reload
+        fi
+        ok "systemd user service removed"
+    fi
+
     if [ "$PLATFORM" = "termux" ]; then
         if [ -d "${SVC_DIR}" ]; then
             FOUND=true
             sv stop "${SVC_DIR}" >/dev/null 2>&1 || true
-            chmod -R u+w "${SVC_DIR}" 2>/dev/null || true; rm -rf "${SVC_DIR}" || true
+            chmod -R u+w "${SVC_DIR}" 2>/dev/null || true
+            rm -rf "${SVC_DIR}"
             ok "runit service removed"
         fi
         if [ -f "${BOOT_DIR}/01-conch" ]; then
+            FOUND=true
             rm -f "${BOOT_DIR}/01-conch"
             ok "boot script removed"
         fi
@@ -463,18 +605,18 @@ if $DO_UNINSTALL; then
         FOUND=true
         rm -f "${BIN_PATH}" "${MCP_BIN_PATH}"
         rm -rf "${CFG_DIR}"
-        ok "Files removed"
+        ok "$MODE-mode files removed"
     fi
 
     if ! $FOUND; then
-        warn "No existing Conch installation found."
+        warn "No $MODE-mode Conch installation found."
         exit 0
     fi
 
     STEP=$((STEP + 1))
     step $STEP $TOTAL_STEPS "Done."
     echo ""
-    ok "Conch has been uninstalled."
+    ok "The $MODE-mode Conch installation has been uninstalled."
     echo ""
     exit 0
 fi
@@ -487,11 +629,18 @@ SERVICE_WAS_ACTIVE=false
 EXISTING_CONFIG_SHA256=""
 [ -f "$BIN_PATH" ] && EXISTING=true
 [ -d "$CFG_DIR" ] && EXISTING=true
-[ "$PLATFORM" = "linux" ] && [ -f /etc/systemd/system/conch.service ] && EXISTING=true
+if [ "$PLATFORM" = "linux" ] && [ "$MODE" = "system" ] &&
+   [ -f /etc/systemd/system/conch.service ]; then
+    EXISTING=true
+fi
+if [ "$PLATFORM" = "linux" ] && [ "$MODE" = "user" ] &&
+   [ -f "${HOME}/.config/systemd/user/conch.service" ]; then
+    EXISTING=true
+fi
 [ "$PLATFORM" = "termux" ] && [ -d "$SVC_DIR" ] && EXISTING=true
 
 if $EXISTING; then
-    step $STEP $TOTAL_STEPS "Existing installation detected"
+    step $STEP $TOTAL_STEPS "Existing $MODE-mode installation detected"
     [ -f "$BIN_PATH" ] && warn "Binary: $BIN_PATH"
     [ -d "$CFG_DIR" ] && warn "Config: $CFG_DIR"
     info "Performing an in-place upgrade; configuration and durable job state will be preserved."
@@ -512,7 +661,11 @@ if $EXISTING; then
             die "Existing API key contains unsupported characters and cannot be printed safely. Repair $ENV_FILE before upgrading."
         fi
     fi
-    if [ "$PLATFORM" = "linux" ]; then
+    if [ "$PLATFORM" = "linux" ] && [ "$MODE" = "user" ] &&
+       [ -f "${HOME}/.config/systemd/user/conch.service" ]; then
+        systemctl --user is-active --quiet conch 2>/dev/null && SERVICE_WAS_ACTIVE=true
+    elif [ "$PLATFORM" = "linux" ] && [ "$MODE" = "system" ] &&
+         [ -f /etc/systemd/system/conch.service ]; then
         systemctl is-active --quiet conch 2>/dev/null && SERVICE_WAS_ACTIVE=true
     elif [ "$PLATFORM" = "termux" ] && [ -d "$SVC_DIR" ]; then
         sv status "$SVC_DIR" 2>/dev/null | grep -q '^run:' && SERVICE_WAS_ACTIVE=true
@@ -624,7 +777,14 @@ step $STEP $TOTAL_STEPS "Installing files..."
 
 # Delay the first upgrade side effect until both release binaries have been acquired and verified.
 if $EXISTING; then
-    if [ "$PLATFORM" = "linux" ] && [ -f /etc/systemd/system/conch.service ]; then
+    if [ "$PLATFORM" = "linux" ] && [ "$MODE" = "user" ] &&
+       [ -f "${HOME}/.config/systemd/user/conch.service" ]; then
+        push_rollback "if $SERVICE_WAS_ACTIVE; then systemctl --user start conch 2>/dev/null || true; fi"
+        systemctl --user stop conch 2>/dev/null || die "Failed to stop existing user conch service"
+        systemctl --user is-active --quiet conch 2>/dev/null &&
+            die "Existing user conch service is still active"
+    elif [ "$PLATFORM" = "linux" ] && [ "$MODE" = "system" ] &&
+         [ -f /etc/systemd/system/conch.service ]; then
         push_rollback "if $SERVICE_WAS_ACTIVE; then systemctl start conch 2>/dev/null || true; fi"
         systemctl stop conch 2>/dev/null || die "Failed to stop existing conch service"
         systemctl is-active --quiet conch 2>/dev/null &&
@@ -636,7 +796,12 @@ if $EXISTING; then
     fi
 fi
 
+BIN_DIR_EXISTED=false
+[ -d "$BIN_DIR" ] && BIN_DIR_EXISTED=true
 mkdir -p "${BIN_DIR}"
+if ! $BIN_DIR_EXISTED; then
+    push_rollback "rmdir -- '$BIN_DIR' 2>/dev/null || true"
+fi
 
 copy_if_different() {
     local src="$1" dst="$2" label="$3"
@@ -651,22 +816,36 @@ copy_if_different() {
 
 SERVER_BACKUP="$BIN_PATH.previous"
 MCP_BACKUP="$MCP_BIN_PATH.previous"
-if [ -f "$BIN_PATH" ]; then
+SERVER_EXISTED=false
+MCP_EXISTED=false
+[ -f "$BIN_PATH" ] && SERVER_EXISTED=true
+[ -f "$MCP_BIN_PATH" ] && MCP_EXISTED=true
+if $SERVER_EXISTED; then
     cp -f "$BIN_PATH" "$SERVER_BACKUP"
     if [ "$PLATFORM" = "linux" ]; then
-        push_rollback "systemctl stop conch 2>/dev/null || true; cp -f '$SERVER_BACKUP' '$BIN_PATH'; chmod 755 '$BIN_PATH'; systemctl daemon-reload"
+        if [ "$MODE" = "user" ]; then
+            push_rollback "systemctl --user stop conch 2>/dev/null || true; cp -f '$SERVER_BACKUP' '$BIN_PATH'; chmod 755 '$BIN_PATH'; systemctl --user daemon-reload"
+        else
+            push_rollback "systemctl stop conch 2>/dev/null || true; cp -f '$SERVER_BACKUP' '$BIN_PATH'; chmod 755 '$BIN_PATH'; systemctl daemon-reload"
+        fi
     else
         push_rollback "sv stop '$SVC_DIR' 2>/dev/null || true; cp -f '$SERVER_BACKUP' '$BIN_PATH'; chmod 755 '$BIN_PATH'"
     fi
 fi
-if [ -f "$MCP_BIN_PATH" ]; then
+if $MCP_EXISTED; then
     cp -f "$MCP_BIN_PATH" "$MCP_BACKUP"
     push_rollback "cp -f '$MCP_BACKUP' '$MCP_BIN_PATH'; chmod 755 '$MCP_BIN_PATH'"
 fi
 
 copy_if_different "$SRC" "$BIN_PATH" "conch"
+if ! $SERVER_EXISTED; then
+    push_rollback "rm -f -- '$BIN_PATH'"
+fi
 if [ -n "$SRC_MCP_FINAL" ]; then
     copy_if_different "$SRC_MCP_FINAL" "${MCP_BIN_PATH}" "conch-mcp"
+    if ! $MCP_EXISTED; then
+        push_rollback "rm -f -- '$MCP_BIN_PATH'"
+    fi
 fi
 
 STEP=$((STEP + 1))
@@ -676,7 +855,12 @@ STEP=$((STEP + 1))
 # ============================================================================
 step $STEP $TOTAL_STEPS "Configuring..."
 
+CFG_DIR_EXISTED=false
+[ -d "$CFG_DIR" ] && CFG_DIR_EXISTED=true
 mkdir -p "${CFG_DIR}"
+if ! $CFG_DIR_EXISTED; then
+    push_rollback "rmdir -- '$CFG_DIR' 2>/dev/null || true"
+fi
 
 if [ -f "$ENV_FILE" ]; then
     CURRENT_CONFIG_SHA256="$(file_sha256 "$ENV_FILE")" ||
@@ -718,41 +902,68 @@ STEP=$((STEP + 1))
 step $STEP $TOTAL_STEPS "Registering service..."
 
 if [ "$PLATFORM" = "linux" ]; then
-    UNIT_FILE="/etc/systemd/system/conch.service"
+    if [ "$MODE" = "user" ]; then
+        UNIT_FILE="${HOME}/.config/systemd/user/conch.service"
+        UNIT_WANTEDBY="default.target"
+        UNIT_DESC="Conch Shell Server (user)"
+        SVCCTL=(systemctl --user)
+        SVCCTL_DISPLAY="systemctl --user"
+    else
+        UNIT_FILE="/etc/systemd/system/conch.service"
+        UNIT_WANTEDBY="multi-user.target"
+        UNIT_DESC="Conch Shell Server"
+        SVCCTL=(systemctl)
+        SVCCTL_DISPLAY="systemctl"
+    fi
+    mkdir -p "$(dirname "${UNIT_FILE}")"
+
+    # Quote systemd paths and escape backslashes, quotes and percent specifiers.
+    # This keeps valid custom prefixes from changing unit tokenization.
+    systemd_escape_path() {
+        local escaped="$1"
+        escaped="${escaped//\\/\\\\}"
+        escaped="${escaped//\"/\\\"}"
+        escaped="${escaped//%/%%}"
+        printf '%s' "$escaped"
+    }
+    UNIT_BIN_PATH="$(systemd_escape_path "$BIN_PATH")"
+    UNIT_ENV_PATH="$(systemd_escape_path "$ENV_FILE")"
 
     # Update the existing unit in place and retain a restorable registration.
     UNIT_BACKUP="${UNIT_FILE}.previous"
     UNIT_EXISTED=false
+    UNIT_WAS_ENABLED=false
     if [ -f "${UNIT_FILE}" ]; then
         UNIT_EXISTED=true
         cp -f "${UNIT_FILE}" "$UNIT_BACKUP"
-        systemctl stop conch 2>/dev/null || true
+        "${SVCCTL[@]}" is-enabled --quiet conch 2>/dev/null && UNIT_WAS_ENABLED=true
+        "${SVCCTL[@]}" stop conch 2>/dev/null || true
     fi
 
     cat > "${UNIT_FILE}" <<UNIT
 [Unit]
-Description=Conch Shell Server
+Description=${UNIT_DESC}
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${BIN_PATH}
-EnvironmentFile=${ENV_FILE}
+ExecStart="${UNIT_BIN_PATH}"
+EnvironmentFile="${UNIT_ENV_PATH}"
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=${UNIT_WANTEDBY}
 UNIT
 
     if $UNIT_EXISTED; then
-        push_rollback "systemctl stop conch 2>/dev/null || true; cp -f '$UNIT_BACKUP' '$UNIT_FILE'; systemctl daemon-reload"
+        push_rollback "$SVCCTL_DISPLAY stop conch 2>/dev/null || true; cp -f '$UNIT_BACKUP' '$UNIT_FILE'; $SVCCTL_DISPLAY daemon-reload; if $UNIT_WAS_ENABLED; then $SVCCTL_DISPLAY enable conch 2>/dev/null || true; else $SVCCTL_DISPLAY disable conch 2>/dev/null || true; fi"
     else
-        push_rollback "systemctl stop conch 2>/dev/null; rm -f '$UNIT_FILE'; systemctl daemon-reload"
+        push_rollback "$SVCCTL_DISPLAY stop conch 2>/dev/null || true; $SVCCTL_DISPLAY disable conch 2>/dev/null || true; rm -f '$UNIT_FILE'; $SVCCTL_DISPLAY daemon-reload"
     fi
-    systemctl daemon-reload
+    "${SVCCTL[@]}" daemon-reload
     ok "systemd unit created"
 
     ENABLE_BOOT=true
@@ -762,23 +973,32 @@ UNIT
         DO_START=false
     elif ! $YES_ALL; then
         echo ""
-        prompt "Enable auto-start on boot?" "y" || ENABLE_BOOT=false
+        if [ "$MODE" = "user" ]; then
+            prompt "Enable auto-start when this user logs in?" "y" || ENABLE_BOOT=false
+        else
+            prompt "Enable auto-start on boot?" "y" || ENABLE_BOOT=false
+        fi
         prompt "Start service now?" "y" || DO_START=false
     fi
 
     if $ENABLE_BOOT; then
-        systemctl enable conch 2>/dev/null || warn "Failed to enable auto-start"
-        ok "Auto-start on boot: enabled"
+        "${SVCCTL[@]}" enable conch 2>/dev/null ||
+            die "Failed to enable $MODE-mode auto-start"
+        if [ "$MODE" = "user" ]; then
+            ok "Auto-start at user login: enabled"
+            info "For start before login, explicitly enable linger if appropriate: loginctl enable-linger $(id -un)"
+        else
+            ok "Auto-start on boot: enabled"
+        fi
     else
-        ok "Auto-start on boot: skipped"
+        ok "Auto-start: skipped"
     fi
 
     if $DO_START; then
-        systemctl start conch 2>/dev/null || die "Failed to start service"
+        "${SVCCTL[@]}" start conch 2>/dev/null || die "Failed to start service"
         sleep 2
-        if systemctl is-active --quiet conch 2>/dev/null; then
+        if "${SVCCTL[@]}" is-active --quiet conch 2>/dev/null; then
             ok "Service started"
-            # Quick health check
             if command -v curl &>/dev/null; then
                 health="$(curl -fsS --max-time 5 "http://localhost:${PORT}/health")" || die "Health check failed"
                 echo "$health" | grep -q '"status":"ok"' || die "Health response is not ok"
@@ -790,10 +1010,10 @@ UNIT
                 ok "Health/version check passed"
             fi
         else
-            die "Service did not reach active state. Check: systemctl status conch"
+            die "Service did not reach active state. Check: $SVCCTL_DISPLAY status conch"
         fi
     else
-        info "Service installed but not started. Start with: systemctl start conch"
+        info "Service installed but not started. Start with: $SVCCTL_DISPLAY start conch"
     fi
 
 elif [ "$PLATFORM" = "termux" ]; then
@@ -907,8 +1127,14 @@ echo "  ${CYAN}Config file:${RESET}   ${ENV_FILE}"
 echo ""
 if [ "$PLATFORM" = "linux" ]; then
     echo "  ${CYAN}Manage:${RESET}"
-    echo "    systemctl {start,stop,restart,status} conch"
-    echo "    journalctl -u conch -f"
+    if [ "$MODE" = "user" ]; then
+        echo "    systemctl --user {start,stop,restart,status} conch"
+        echo "    journalctl --user -u conch -f"
+    else
+        echo "    systemctl {start,stop,restart,status} conch"
+        echo "    journalctl -u conch -f"
+    fi
+    echo "    Uninstall: $0 --uninstall --mode $MODE"
 elif [ "$PLATFORM" = "termux" ]; then
     echo "  ${CYAN}Manage:${RESET}"
     echo "    sv {up,down,status} conch"

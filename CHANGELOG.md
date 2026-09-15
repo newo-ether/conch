@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.19] - 2026-09-15
+
+### Added
+
+- Add isolated per-user installation on Linux through a systemd user service and
+  on Windows through a Scheduled Task owned by the current user.
+- Default new installations to least-privilege user mode while automatically
+  retaining the one detected existing mode during an update.
+- Add installer lifecycle regressions for user-mode install, upgrade, stale-file
+  recovery and uninstall, including prefixes containing spaces.
+
+### Fixed
+
+- Make Windows user-mode tasks own the Conch process through a synchronous
+  PowerShell launcher, retain the native process handle, and propagate the real
+  exit code so task restart-on-failure remains effective.
+- Scope stop, restart, rollback and uninstall to the installed binary instead of
+  unrelated processes with the same name.
+- Preserve an existing Windows service's account, start type, display name and
+  recovery policy; refuse a same-name service or install-prefix migration.
+- Keep system and user installations isolated during detection and uninstall,
+  refuse implicit mode migration, and restore a replaced Windows task on rollback.
+- Quote Linux systemd paths, fail when auto-start cannot be enabled, and leave
+  persistent user linger policy to an explicit administrator decision.
+- Roll back new binaries, configuration directories, launchers, unit definitions
+  and previous systemd enablement when registration or first start fails.
+- Allow user-mode Linux uninstall after logout even when the user systemd manager
+  is unavailable, without pretending that manager operations succeeded.
+
+### Verification
+
+- Require both installer suites in CI and in tagged release qualification,
+  including a Windows release gate before publishing assets.
+- Publish tagged assets through a draft Release without `--clobber`, and refuse
+  to replace any Release that already exists for the tag.
+- Enforce LF endings for scripts, tests, workflows and documentation.
+
+
 ## [1.0.18] - 2026-09-13
 
 ### Security
@@ -139,7 +177,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.18...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.19...HEAD
+[1.0.19]: https://github.com/newo-ether/conch/compare/v1.0.18...v1.0.19
 [1.0.18]: https://github.com/newo-ether/conch/compare/v1.0.17...v1.0.18
 [1.0.17]: https://github.com/newo-ether/conch/compare/v1.0.16...v1.0.17
 [1.0.16]: https://github.com/newo-ether/conch/compare/v1.0.15...v1.0.16

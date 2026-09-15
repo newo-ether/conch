@@ -1,10 +1,11 @@
 <#
 .SYNOPSIS
-    Install Conch Shell Server as a Windows service.
+    Install Conch Shell Server as a Windows managed background service.
 
 .DESCRIPTION
     Downloads (or builds) the conch binary, generates an API key, and registers
-    a Windows service via nssm. Interactive by default - use -Yes for scripting.
+    either a machine-wide nssm service or a per-user Scheduled Task. Interactive
+    by default - use -Yes for scripting.
 
 .PARAMETER ApiKey
     Pre-shared API key. If omitted, a random 32-byte key is generated.
@@ -31,24 +32,32 @@
     Path to a pre-built conch-mcp.exe. Skips download / Go build.
 
 .PARAMETER Prefix
-    Install root directory. Default: $env:ProgramFiles\Conch.
+    Install root directory. Defaults to $env:ProgramFiles\Conch in system mode
+    or $env:LOCALAPPDATA\Conch in user mode.
 
 .PARAMETER NoStart
-    Install but do not start the service.
+    Install but do not start the service or background task.
 
 .PARAMETER Yes
     Skip all prompts, accept all defaults. Useful for scripting.
 
 .PARAMETER Uninstall
-    Remove the service, binary, and config.
+    Remove one selected installation mode. When both modes exist, -Mode is
+    required so an uninstall cannot remove the other mode accidentally.
+
+.PARAMETER Mode
+    Install mode: 'user' is the default for a new installation and creates a
+    per-user background task that owns the Conch process and starts at logon.
+    'system' registers a machine-wide Windows service and requires administrator
+    privileges. An update automatically retains the one existing mode.
 
 .EXAMPLE
-    # Interactive install (random key, download from GitHub Releases)
+    # New per-user install (default; random key, download from GitHub Releases)
     .\install.ps1
 
 .EXAMPLE
-    # Non-interactive (scripting / CI)
-    .\install.ps1 -Yes
+    # Explicit machine-wide install (run as Administrator)
+    .\install.ps1 -Mode system -Yes
 
 .EXAMPLE
     # Custom port and key
@@ -61,6 +70,10 @@
 .EXAMPLE
     # Uninstall
     .\install.ps1 -Uninstall
+
+.EXAMPLE
+    # Per-user background process (auto-start at logon, runs as you)
+    .\install.ps1 -Mode user
 #>
 
 param(
@@ -80,7 +93,9 @@ param(
     [string]$Prefix        = "",
     [switch]$NoStart       = $false,
     [switch]$Yes           = $false,
-    [switch]$Uninstall     = $false
+    [switch]$Uninstall     = $false,
+    [ValidateSet('system', 'user')]
+    [string]$Mode          = ""
 )
 
 & {
@@ -222,6 +237,100 @@ function Prompt-User {
 Write-Banner
 
 # ============================================================================
+# Install mode resolution (system service vs user background task)
+# ============================================================================
+function Select-InstallMode {
+    param(
+        [string]$RequestedMode,
+        [bool]$ForUninstall,
+        [bool]$HasCustomPrefix,
+        [bool]$CustomPrefixExists,
+        [bool]$SystemPresent,
+        [bool]$UserPresent
+    )
+
+    if ($RequestedMode) { return $RequestedMode }
+
+    if ($ForUninstall -and $HasCustomPrefix) {
+        throw "Specify -Mode system or -Mode user when uninstalling a custom -Prefix."
+    }
+    if ($SystemPresent -and $UserPresent) {
+        throw "Both system and user installations exist. Specify -Mode system or -Mode user."
+    }
+    if ($SystemPresent) { return "system" }
+    if ($UserPresent) { return "user" }
+
+    if (-not $ForUninstall -and $HasCustomPrefix -and $CustomPrefixExists) {
+        throw "The custom -Prefix already exists but its installation mode cannot be identified. Specify -Mode system or -Mode user."
+    }
+
+    # New installations default to least-privilege user mode. With nothing to
+    # uninstall, use the same default so an ordinary user gets a safe no-op.
+    return "user"
+}
+
+function Resolve-InstallMode {
+    param(
+        [string]$RequestedMode,
+        [bool]$ForUninstall,
+        [string]$InstallPrefix
+    )
+
+    if ($RequestedMode) { return $RequestedMode }
+
+    $modeProbeTask = $null
+    if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+        $modeProbeTask = Get-ScheduledTask -TaskPath "\" -TaskName "Conch" -ErrorAction SilentlyContinue
+    }
+    $systemPresent = [bool](
+        (Get-Service -Name "Conch" -ErrorAction SilentlyContinue) -or
+        (Test-Path -LiteralPath "$env:ProgramFiles\Conch")
+    )
+    $userPresent = [bool](
+        $modeProbeTask -or
+        (Test-Path -LiteralPath "$env:LOCALAPPDATA\Conch")
+    )
+    $customPrefixExists = [bool](
+        $InstallPrefix -and (Test-Path -LiteralPath $InstallPrefix)
+    )
+
+    return Select-InstallMode `
+        -RequestedMode $RequestedMode `
+        -ForUninstall $ForUninstall `
+        -HasCustomPrefix ([bool]$InstallPrefix) `
+        -CustomPrefixExists $customPrefixExists `
+        -SystemPresent $systemPresent `
+        -UserPresent $userPresent
+}
+
+$Mode = Resolve-InstallMode `
+    -RequestedMode $Mode `
+    -ForUninstall ([bool]$Uninstall) `
+    -InstallPrefix $Prefix
+
+if ($Mode -eq "user" -and ([Security.Principal.WindowsIdentity]::GetCurrent()).IsSystem) {
+    Write-ErrorExit "User mode must be run from your own interactive session, not as SYSTEM or a service. Open a normal PowerShell window and re-run." -NoRollback
+}
+
+# ============================================================================
+# Mode-specific constants must exist before Find-Nssm runs so a system upgrade
+# can reuse the wrapper stored in its existing install directory.
+# ============================================================================
+$ServiceName = "Conch"
+$TaskName   = "Conch"
+$TaskPath   = "\"
+$InstallDir = if ($Prefix) { $Prefix } elseif ($Mode -eq "user") { "$env:LOCALAPPDATA\Conch" } else { "$env:ProgramFiles\Conch" }
+$BinPath    = "$InstallDir\conch.exe"
+$McpBinPath = "$InstallDir\conch-mcp.exe"
+$EnvFile    = "$InstallDir\env.txt"
+$EnvFileTmp = "$InstallDir\env.txt.tmp"
+$LaunchScript = "$InstallDir\launch.ps1"
+$PidFile      = "$InstallDir\conch.pid"
+$LogFile      = "$InstallDir\conch.log"
+$ErrorLogFile = "$InstallDir\conch-error.log"
+$NssmParametersPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName\Parameters"
+
+# ============================================================================
 # Step 1 - Environment checks
 # ============================================================================
 $Step = 1
@@ -239,12 +348,21 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] `
     [Security.Principal.WindowsIdentity]::GetCurrent()
 ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-if (-not $isAdmin) {
-    Write-Err "Administrator privileges required."
+if ($Mode -eq "system" -and -not $isAdmin) {
+    Write-Err "Administrator privileges required for system-mode install or uninstall."
     Write-Host "    Right-click PowerShell -> Run as Administrator, then re-run."
+    if (-not $Uninstall) {
+        Write-Host "    Or install as a per-user background task: .\install.ps1 -Mode user"
+    }
     throw "Administrator privileges required."
 }
-Write-OK "Administrator"
+if ($Uninstall) {
+    Write-OK "Uninstall mode"
+} elseif ($Mode -eq "system") {
+    Write-OK "Administrator"
+} else {
+    Write-OK "User mode (no administrator required)"
+}
 
 # --- OS version sanity check ---
 $osVer = [Environment]::OSVersion.Version
@@ -295,20 +413,25 @@ function Install-Nssm {
     return $null
 }
 
-$nssm = Find-Nssm
-if ($nssm) {
-    Write-OK "nssm: $($nssm.Source)"
-} elseif (-not $Uninstall) {
-    $nssm = Install-Nssm
+if ($Mode -eq "system") {
+    $nssm = Find-Nssm
     if ($nssm) {
-        Write-OK "nssm installed: $($nssm.Source)"
-    } else {
-        Write-Err "nssm (Non-Sucking Service Manager) is required."
-        Write-Host "    Install it manually, then re-run this script:"
-        Write-Host "      winget install NSSM.NSSM"
-        Write-Host "    Or download from: https://nssm.cc/download"
-        throw "nssm not found and could not be installed automatically."
+        Write-OK "nssm: $($nssm.Source)"
+    } elseif (-not $Uninstall) {
+        $nssm = Install-Nssm
+        if ($nssm) {
+            Write-OK "nssm installed: $($nssm.Source)"
+        } else {
+            Write-Err "nssm (Non-Sucking Service Manager) is required."
+            Write-Host "    Install it manually, then re-run this script:"
+            Write-Host "      winget install NSSM.NSSM"
+            Write-Host "    Or download from: https://nssm.cc/download"
+            throw "nssm not found and could not be installed automatically."
+        }
     }
+} else {
+    $nssm = $null
+    Write-OK "User mode - no service manager required"
 }
 
 # --- Internet connectivity check (non-blocking, just a warning) ---
@@ -356,16 +479,6 @@ if (-not $Uninstall) {
     }
 }
 
-# ============================================================================
-# Constants
-# ============================================================================
-$ServiceName = "Conch"
-$InstallDir  = if ($Prefix) { $Prefix } else { "$env:ProgramFiles\Conch" }
-$BinPath     = "$InstallDir\conch.exe"
-$McpBinPath  = "$InstallDir\conch-mcp.exe"
-$EnvFile     = "$InstallDir\env.txt"
-$EnvFileTmp  = "$InstallDir\env.txt.tmp"
-
 # $ScriptDir is $null when invoked via irm | iex (no actual script file).
 $ScriptDir = if ($MyInvocation.MyCommand.Path) {
     Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -408,10 +521,7 @@ function Stop-ServiceWait {
         if ($svc.Status -eq "Stopped") { return $true }
         $TimeoutSec--
     }
-    Write-Warn "Service '$Name' did not stop within timeout - forcing..."
-    Get-Process -Name $Name -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
+    Write-Warn "Service '$Name' did not stop within timeout. Refusing to kill processes by name."
     return $false
 }
 
@@ -489,9 +599,20 @@ function Protect-SecretFile {
     if ((Get-Item -LiteralPath $Path).Attributes -band [IO.FileAttributes]::ReparsePoint) {
         throw 'Secret files must not be links'
     }
-    $acl = New-Object Security.AccessControl.FileSecurity
-    $acl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)')
-    Set-Acl -LiteralPath $Path -AclObject $acl
+    if ($Mode -eq "user") {
+        $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $acl = New-Object Security.AccessControl.FileSecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            [Security.Principal.SecurityIdentifier]'S-1-5-18', 'FullControl', 'Allow')))
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            $userSid, 'FullControl', 'Allow')))
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    } else {
+        $acl = New-Object Security.AccessControl.FileSecurity
+        $acl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)')
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    }
 }
 
 function Protect-ServiceSecrets {
@@ -530,15 +651,158 @@ function Write-AtomicConfig {
 # ============================================================================
 function Remove-Safe {
     param([string]$Path, [string]$Label)
-    if (-not (Test-Path $Path)) { return }
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
     try {
         Retry-Command -Script {
-            Remove-Item -Recurse -Force $Path -ErrorAction Stop
+            Remove-Item -Recurse -Force -LiteralPath $Path -ErrorAction Stop
         } -MaxAttempts 3 -DelaySeconds 1 -Description "removing $Label"
+        return -not (Test-Path -LiteralPath $Path)
     } catch {
         Write-Warn "Could not remove $Label. It may be locked by another process."
         Write-Warn "  Please close any programs using it and delete manually: $Path"
+        return $false
     }
+}
+
+function Test-SamePath {
+    param([string]$Left, [string]$Right)
+    if ([string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) {
+        return $false
+    }
+    return [StringComparer]::OrdinalIgnoreCase.Equals(
+        [IO.Path]::GetFullPath($Left),
+        [IO.Path]::GetFullPath($Right)
+    )
+}
+
+function Get-ProcessesAtExactPath {
+    param([string[]]$Paths)
+    $expected = @{}
+    foreach ($path in $Paths) {
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            $expected[[IO.Path]::GetFullPath($path).ToLowerInvariant()] = $true
+        }
+    }
+
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+        try {
+            $actual = $process.Path
+            if ($actual -and $expected.ContainsKey([IO.Path]::GetFullPath($actual).ToLowerInvariant())) {
+                $process
+            }
+        } catch {
+            # Processes owned by another identity may hide their executable path.
+        }
+    }
+}
+
+function Stop-ProcessesAtExactPath {
+    param([string[]]$Paths)
+    foreach ($process in @(Get-ProcessesAtExactPath -Paths $Paths)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction Stop
+        try { $process.WaitForExit(5000) | Out-Null } catch { }
+    }
+}
+
+function Stop-UserTaskProcess {
+    param(
+        [string]$Name = $TaskName,
+        [string]$Path = "\",
+        [string]$ProcessIdFile = $PidFile,
+        [string]$ExpectedBinary = $BinPath
+    )
+
+    if (Get-Command Stop-ScheduledTask -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskPath $Path -TaskName $Name -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 250
+
+    if (Test-Path -LiteralPath $ProcessIdFile) {
+        $recordedPid = 0
+        [void][int]::TryParse(
+            ([IO.File]::ReadAllText($ProcessIdFile).Trim()),
+            [ref]$recordedPid
+        )
+        if ($recordedPid -gt 0) {
+            $process = Get-Process -Id $recordedPid -ErrorAction SilentlyContinue
+            if ($process) {
+                $actualPath = $null
+                try { $actualPath = $process.Path } catch { }
+                if (-not (Test-SamePath -Left $actualPath -Right $ExpectedBinary)) {
+                    Write-Warn "Ignoring stale PID file; process $recordedPid is not $ExpectedBinary"
+                } else {
+                    Stop-Process -Id $recordedPid -Force -ErrorAction Stop
+                    try { $process.WaitForExit(5000) | Out-Null } catch { }
+                }
+            }
+        }
+        Remove-Item -Force -LiteralPath $ProcessIdFile -ErrorAction SilentlyContinue
+    }
+
+    # Safely adopt user installs created by older launchers that did not write a PID file.
+    Stop-ProcessesAtExactPath -Paths @($ExpectedBinary)
+}
+
+function New-UserLauncherContent {
+    param(
+        [string]$InstallRoot,
+        [string]$ConfigPath,
+        [string]$ServerPath,
+        [string]$ProcessIdFile,
+        [string]$StdoutPath,
+        [string]$StderrPath
+    )
+
+    $template = @'
+$ErrorActionPreference = "Stop"
+$installDir = '__INSTALL_ROOT__'
+$configPath = '__CONFIG_PATH__'
+$serverPath = '__SERVER_PATH__'
+$pidFile = '__PID_FILE__'
+$stdoutPath = '__STDOUT_PATH__'
+$stderrPath = '__STDERR_PATH__'
+
+foreach ($line in [IO.File]::ReadAllLines($configPath)) {
+    if ($line -match '^[A-Za-z_][A-Za-z0-9_]*=') {
+        $separator = $line.IndexOf('=')
+        $name = $line.Substring(0, $separator)
+        $value = $line.Substring($separator + 1)
+        [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+    }
+}
+
+$child = $null
+$exitCode = 1
+try {
+    $child = Start-Process -FilePath $serverPath -WorkingDirectory $installDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    [void]$child.Handle
+    [IO.File]::WriteAllText($pidFile, [string]$child.Id, [Text.Encoding]::ASCII)
+    $child.WaitForExit()
+    $child.Refresh()
+    $exitCode = $child.ExitCode
+} finally {
+    if (Test-Path -LiteralPath $pidFile) {
+        $recorded = [IO.File]::ReadAllText($pidFile).Trim()
+        if ($child -and $recorded -eq [string]$child.Id) {
+            Remove-Item -Force -LiteralPath $pidFile -ErrorAction SilentlyContinue
+        }
+    }
+}
+[Environment]::Exit($exitCode)
+'@
+
+    $values = @{
+        "__INSTALL_ROOT__" = $InstallRoot
+        "__CONFIG_PATH__" = $ConfigPath
+        "__SERVER_PATH__" = $ServerPath
+        "__PID_FILE__" = $ProcessIdFile
+        "__STDOUT_PATH__" = $StdoutPath
+        "__STDERR_PATH__" = $StderrPath
+    }
+    foreach ($entry in $values.GetEnumerator()) {
+        $template = $template.Replace($entry.Key, $entry.Value.Replace("'", "''"))
+    }
+    return $template
 }
 
 # ============================================================================
@@ -556,45 +820,73 @@ function Test-ValidBinary {
 # Step 2 - Uninstall (if requested)
 # ============================================================================
 if ($Uninstall) {
-    Write-Step $Step $TotalSteps "Uninstalling Conch..."
+    Write-Step $Step $TotalSteps "Uninstalling Conch ($Mode mode)..."
 
-    $existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    $existingDir = Test-Path $InstallDir
+    if ($Mode -eq "user" -and -not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+        throw "The ScheduledTasks PowerShell module is required to uninstall user mode safely."
+    }
 
-    if (-not $existingSvc -and -not $existingDir) {
-        Write-Warn "No existing Conch installation found."
+    $existingSvc = if ($Mode -eq "system") {
+        Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    } else {
+        $null
+    }
+    $existingTask = if ($Mode -eq "user") {
+        Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue
+    } else {
+        $null
+    }
+    $existingDir = Test-Path -LiteralPath $InstallDir
+
+    if (-not $existingSvc -and -not $existingTask -and -not $existingDir) {
+        Write-Warn "No $Mode-mode Conch installation found."
         return
     }
 
     if (-not $Yes) {
-        if (-not (Prompt-User "Remove Conch completely (service + files)?" -Default "Y")) {
+        if (-not (Prompt-User "Remove the $Mode-mode Conch installation and its files?" -Default "Y")) {
             Write-Info "Aborted by user."
             return
         }
     }
 
-    if ($existingSvc) {
-        Write-Info "Stopping service..."
-        Stop-ServiceWait -Name $ServiceName
-        cmd /c "sc.exe delete `"$ServiceName`" >nul 2>&1"
-        cmd /c "nssm remove `"$ServiceName`" confirm >nul 2>&1"
-        Write-OK "Service removed: $ServiceName"
+    if ($Mode -eq "system" -and $existingSvc) {
+        Write-Info "Stopping system service..."
+        if (-not (Stop-ServiceWait -Name $ServiceName)) {
+            throw "Service '$ServiceName' did not stop cleanly."
+        }
+        $removeNssm = Find-Nssm
+        if ($removeNssm) {
+            Invoke-Nssm -Path $removeNssm.Source -Arguments @("remove", $ServiceName, "confirm")
+        } else {
+            & sc.exe delete $ServiceName | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to delete system service '$ServiceName' (exit code $LASTEXITCODE)."
+            }
+        }
+        Write-OK "System service removed: $ServiceName"
     }
 
-    Get-Process -Name "conch", "conch-mcp" -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
+    if ($Mode -eq "user" -and $existingTask) {
+        Write-Info "Stopping user background task..."
+        Stop-UserTaskProcess
+        Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+        Write-OK "User background task removed: $TaskName"
+    }
+
+    Stop-ProcessesAtExactPath -Paths @($BinPath, $McpBinPath)
 
     if ($existingDir) {
-        Remove-Safe $InstallDir "install directory"
-        if (-not (Test-Path $InstallDir)) {
-            Write-OK "Removed: $InstallDir"
+        if (-not (Remove-Safe $InstallDir "$Mode-mode install directory")) {
+            throw "Failed to remove $InstallDir"
         }
+        Write-OK "Removed: $InstallDir"
     }
 
     $Step++
     Write-Step $Step $TotalSteps "Done."
     Write-Host ""
-    Write-OK "Conch has been uninstalled."
+    Write-OK "The $Mode-mode Conch installation has been uninstalled."
     Write-Host ""
     return
 }
@@ -602,21 +894,55 @@ if ($Uninstall) {
 # ============================================================================
 # Step 2 - Detect & handle existing installation
 # ============================================================================
-$existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-$existingDir = Test-Path $InstallDir
+$allSystemSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+$allUserTask = $null
+if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+    $allUserTask = Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue
+}
+
+$systemInstallDir = "$env:ProgramFiles\Conch"
+$userInstallDir = "$env:LOCALAPPDATA\Conch"
+$systemModePresent = [bool]($allSystemSvc -or (Test-Path -LiteralPath $systemInstallDir))
+$userModePresent = [bool]($allUserTask -or (Test-Path -LiteralPath $userInstallDir))
+
+if ($Mode -eq "user" -and $systemModePresent) {
+    throw "A system-mode Conch installation already exists. Refusing an implicit mode migration; uninstall it explicitly with -Uninstall -Mode system first."
+}
+if ($Mode -eq "system" -and $userModePresent) {
+    throw "A user-mode Conch installation already exists. Refusing an implicit mode migration; uninstall it explicitly with -Uninstall -Mode user first."
+}
+
+$existingSvc = if ($Mode -eq "system") { $allSystemSvc } else { $null }
+$existingTask = if ($Mode -eq "user") { $allUserTask } else { $null }
+if ($existingSvc) {
+    $existingRegistration = Get-ItemProperty -LiteralPath $NssmParametersPath -ErrorAction Stop
+    if (-not $existingRegistration.Application -or
+        -not (Test-SamePath -Left $existingRegistration.Application -Right $BinPath)) {
+        throw "The existing Conch service is registered to a different application. Refusing an implicit service or prefix migration."
+    }
+    if ($existingRegistration.AppDirectory -and
+        -not (Test-SamePath -Left $existingRegistration.AppDirectory -Right $InstallDir)) {
+        throw "The existing Conch service uses a different working directory. Refusing an implicit prefix migration."
+    }
+}
+$existingDir = Test-Path -LiteralPath $InstallDir
 $ServiceWasRunning = [bool]($existingSvc -and $existingSvc.Status -eq "Running")
-$IsUpgrade = [bool]($existingSvc -or $existingDir)
+$TaskWasRunning = [bool]($existingTask -and $existingTask.State -eq "Running")
+if ($existingTask -and @(Get-ProcessesAtExactPath -Paths @($BinPath)).Count -gt 0) {
+    $TaskWasRunning = $true
+}
+$IsUpgrade = [bool]($existingSvc -or $existingTask -or $existingDir)
 
 if ($IsUpgrade) {
-    Write-Step $Step $TotalSteps "Existing installation detected"
-    if ($existingSvc) { Write-Warn "Service:  $ServiceName ($($existingSvc.Status))" }
-    if ($existingDir) { Write-Warn "Location: $InstallDir" }
+    Write-Step $Step $TotalSteps "Existing $Mode-mode installation detected"
+    if ($existingSvc)  { Write-Warn "Service:  $ServiceName ($($existingSvc.Status))" }
+    if ($existingTask) { Write-Warn "Task:     $TaskName ($($existingTask.State))" }
+    if ($existingDir)  { Write-Warn "Location: $InstallDir" }
     Write-Info "Performing an in-place upgrade; configuration and durable job state will be preserved."
 }
 
 $Step++
 
-# ============================================================================
 # ============================================================================
 # Step 3 - Acquire binary
 # ============================================================================
@@ -800,7 +1126,7 @@ $Step++
 Write-Step $Step $TotalSteps "Installing files..."
 
 # Delay the first upgrade side effect until release binaries have been acquired and verified.
-if ($existingSvc) {
+if ($Mode -eq "system" -and $existingSvc) {
     Push-Rollback {
         if ($ServiceWasRunning) {
             Start-ServiceWait -Name $ServiceName -TimeoutSec 15 | Out-Null
@@ -809,6 +1135,13 @@ if ($existingSvc) {
     if (-not (Stop-ServiceWait -Name $ServiceName)) {
         throw "Service '$ServiceName' did not stop cleanly; refusing to replace its binary."
     }
+} elseif ($Mode -eq "user" -and $IsUpgrade) {
+    Push-Rollback {
+        if ($TaskWasRunning -and (Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+            Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue
+        }
+    } "Restore previous user task running state"
+    Stop-UserTaskProcess
 }
 
 # Create install directory with rollback registration
@@ -857,14 +1190,20 @@ function Copy-IfDifferent {
 
 $ServerBackup = "$BinPath.previous"
 $McpBackup = "$McpBinPath.previous"
-if (Test-Path $BinPath) {
+$ServerExisted = Test-Path -LiteralPath $BinPath
+$McpExisted = Test-Path -LiteralPath $McpBinPath
+if ($ServerExisted) {
     Copy-Item -Force -LiteralPath $BinPath -Destination $ServerBackup
     Push-Rollback {
         if (Test-Path $ServerBackup) {
-            Stop-ServiceWait -Name $ServiceName | Out-Null
+            if ($Mode -eq "system") {
+                Stop-ServiceWait -Name $ServiceName | Out-Null
+            } else {
+                Stop-UserTaskProcess
+            }
             Copy-Item -Force -LiteralPath $ServerBackup -Destination $BinPath
             if ($existingSvc) {
-                $rollbackNssm = Get-Command nssm -ErrorAction SilentlyContinue
+                $rollbackNssm = Find-Nssm
                 if ($rollbackNssm -and (Test-Path $EnvFile)) {
                     $rollbackEnv = @(
                         Get-Content -LiteralPath $EnvFile |
@@ -874,9 +1213,9 @@ if (Test-Path $BinPath) {
                 }
             }
         }
-    } "Restore previous conch.exe and service registration"
+    } "Restore previous conch.exe and registration"
 }
-if (Test-Path $McpBinPath) {
+if ($McpExisted) {
     Copy-Item -Force -LiteralPath $McpBinPath -Destination $McpBackup
     Push-Rollback {
         if (Test-Path $McpBackup) {
@@ -886,8 +1225,18 @@ if (Test-Path $McpBinPath) {
 }
 
 Copy-IfDifferent $SrcBin $BinPath "conch.exe"
+if (-not $ServerExisted) {
+    Push-Rollback {
+        Remove-Item -Force -LiteralPath $BinPath -ErrorAction SilentlyContinue
+    } "Remove newly installed conch.exe"
+}
 if ($SrcMcp) {
     Copy-IfDifferent $SrcMcp $McpBinPath "conch-mcp.exe"
+    if (-not $McpExisted) {
+        Push-Rollback {
+            Remove-Item -Force -LiteralPath $McpBinPath -ErrorAction SilentlyContinue
+        } "Remove newly installed conch-mcp.exe"
+    }
 }
 
 $Step++
@@ -990,86 +1339,203 @@ if ($NoAuth) {
 $Step++
 
 # ============================================================================
-# Step 6 - Register & start service
+# Step 6 - Register & start (system service or user background task)
 # ============================================================================
-Write-Step $Step $TotalSteps "Registering service..."
-
-# nssm was already acquired in Step 1; verify it still resolves
-if (-not $nssm) {
-    $nssm = Get-Command nssm -ErrorAction SilentlyContinue
-    if (-not $nssm) {
-        throw "nssm lost after install. Please re-run the script."
-    }
-}
-Write-OK "nssm ready: $($nssm.Source)"
-$nssmExe = $nssm.Source
-
-# Update an existing service in place so a later failure can retain its registration.
-$existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($existingSvc) {
-    Write-Info "Updating existing service registration in place..."
-    Stop-ServiceWait -Name $ServiceName | Out-Null
-    Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "Application", $BinPath)
+if ($Mode -eq "system") {
+    Write-Step $Step $TotalSteps "Registering service..."
 } else {
-    Write-Info "Creating service..."
-    Invoke-Nssm -Path $nssmExe -Arguments @("install", $ServiceName, $BinPath)
-    Push-Rollback {
-        Invoke-Nssm -Path $nssmExe -Arguments @("remove", $ServiceName, "confirm") -AllowFailure
-    } "Remove created service: $ServiceName"
+    Write-Step $Step $TotalSteps "Registering background task..."
 }
 
-Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "AppDirectory", $InstallDir)
-Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "Start", "SERVICE_AUTO_START")
-Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "ObjectName", "NT AUTHORITY\SYSTEM")
-Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "DisplayName", "Conch Shell Server")
+if ($Mode -eq "system") {
+    # nssm was already acquired in Step 1; verify it still resolves
+    if (-not $nssm) {
+        $nssm = Get-Command nssm -ErrorAction SilentlyContinue
+        if (-not $nssm) {
+            throw "nssm lost after install. Please re-run the script."
+        }
+    }
+    Write-OK "nssm ready: $($nssm.Source)"
+    $nssmExe = $nssm.Source
 
-# Set failure recovery: restart on failure (3 times)
-Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "AppExit", "Default", "Restart")
+    # Update an existing service in place. Service identity, start type, display
+    # name and recovery policy belong to the existing deployment and are not
+    # rewritten during an upgrade.
+    $existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($existingSvc) {
+        Write-Info "Updating existing service registration in place..."
+        Stop-ServiceWait -Name $ServiceName | Out-Null
+        Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "Application", $BinPath)
+        Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "AppDirectory", $InstallDir)
+    } else {
+        Write-Info "Creating service..."
+        Invoke-Nssm -Path $nssmExe -Arguments @("install", $ServiceName, $BinPath)
+        Push-Rollback {
+            Invoke-Nssm -Path $nssmExe -Arguments @("remove", $ServiceName, "confirm") -AllowFailure
+        } "Remove created service: $ServiceName"
 
-# Environment variables
-Protect-ServiceSecrets "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName\Parameters"
-$envLines = @(
-    Get-Content -LiteralPath $EnvFile |
-        Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' }
-)
-$environmentArguments = @("set", $ServiceName, "AppEnvironmentExtra") + $envLines
-Invoke-Nssm -Path $nssmExe -Arguments $environmentArguments
+        Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "AppDirectory", $InstallDir)
+        Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "Start", "SERVICE_AUTO_START")
+        Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "ObjectName", "NT AUTHORITY\SYSTEM")
+        Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "DisplayName", "Conch Shell Server")
+        Invoke-Nssm -Path $nssmExe -Arguments @("set", $ServiceName, "AppExit", "Default", "Restart")
+    }
 
-Write-OK "Service registered: $ServiceName (auto-start, auto-restart on failure)"
+    # Environment variables
+    Protect-ServiceSecrets $NssmParametersPath
+    $envLines = @(
+        Get-Content -LiteralPath $EnvFile |
+            Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' }
+    )
+    $environmentArguments = @("set", $ServiceName, "AppEnvironmentExtra") + $envLines
+    Invoke-Nssm -Path $nssmExe -Arguments $environmentArguments
 
-# Start service
+    Write-OK "Service registered: $ServiceName (auto-start, auto-restart on failure)"
+
+} else {
+    # ========================================================================
+    # User mode: synchronous PowerShell launcher + logon scheduled task
+    # ========================================================================
+
+    foreach ($requiredCommand in @(
+        "Get-ScheduledTask",
+        "Export-ScheduledTask",
+        "Register-ScheduledTask",
+        "Unregister-ScheduledTask",
+        "New-ScheduledTaskAction",
+        "New-ScheduledTaskTrigger",
+        "New-ScheduledTaskPrincipal",
+        "New-ScheduledTaskSettingsSet"
+    )) {
+        if (-not (Get-Command $requiredCommand -ErrorAction SilentlyContinue)) {
+            throw "The ScheduledTasks PowerShell module is missing required command: $requiredCommand"
+        }
+    }
+
+    $launchBackup = "$LaunchScript.previous"
+    if (Test-Path -LiteralPath $LaunchScript) {
+        Copy-Item -Force -LiteralPath $LaunchScript -Destination $launchBackup
+        Push-Rollback {
+            Copy-Item -Force -LiteralPath $launchBackup -Destination $LaunchScript -ErrorAction SilentlyContinue
+        } "Restore previous user launcher"
+    } else {
+        Push-Rollback {
+            Remove-Item -Force -LiteralPath $LaunchScript -ErrorAction SilentlyContinue
+        } "Remove newly created user launcher"
+    }
+
+    $launch = New-UserLauncherContent -InstallRoot $InstallDir -ConfigPath $EnvFile -ServerPath $BinPath -ProcessIdFile $PidFile -StdoutPath $LogFile -StderrPath $ErrorLogFile
+    [IO.File]::WriteAllText($LaunchScript, $launch, (New-Object Text.UTF8Encoding($false)))
+    Write-OK "Synchronous launcher written: $LaunchScript"
+
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
+        '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
+        $LaunchScript + '"'
+    )
+    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
+    $taskPrincipal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
+    $taskSettings = New-ScheduledTaskSettingsSet `
+        -RestartCount 999 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -MultipleInstances IgnoreNew `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries
+
+    $taskBeforeRegistration = Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($taskBeforeRegistration) {
+        $taskBackupXml = Export-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName
+        Push-Rollback {
+            Stop-UserTaskProcess
+            Register-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -Xml $taskBackupXml -Force | Out-Null
+        } "Restore previous scheduled task definition"
+    } else {
+        Push-Rollback {
+            Stop-UserTaskProcess
+            Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        } "Remove created scheduled task: $TaskName"
+    }
+
+    Register-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName `
+        -Action $taskAction `
+        -Trigger $taskTrigger `
+        -Principal $taskPrincipal `
+        -Settings $taskSettings `
+        -Description "Conch Shell Server (user mode, runs as $currentUser)" `
+        -Force | Out-Null
+
+    Write-OK "Scheduled task registered: $TaskName (owns the server process and restarts on failure)"
+}
+
+# Start now
 $DoStart = -not $NoStart
 if (-not $NoStart -and -not $Yes) {
     Write-Host ""
-    $DoStart = Prompt-User "Start the Conch service now?" -Default "Y"
+    $DoStart = Prompt-User "Start Conch now?" -Default "Y"
 }
 
 if ($DoStart) {
-    Write-Info "Starting service..."
-    $started = Start-ServiceWait -Name $ServiceName -TimeoutSec 15
-
-    if ($started) {
-        Write-OK "Service started"
-        # Quick health check
-        try {
-            Start-Sleep -Seconds 1
-            $health = Invoke-RestMethod -Uri "http://localhost:$Port/health" -TimeoutSec 5 -ErrorAction SilentlyContinue
-            if (-not $health -or $health.status -ne "ok" -or -not $health.version) {
-                throw "health response is missing status/version"
-            }
-            if ($Version -ne "latest" -and $health.version -ne $Version) {
-                throw "installed version $($health.version) does not match requested $Version"
-            }
-            Write-OK "Health/version check passed: $($health.version)"
-        } catch {
-            Write-ErrorExit "Health/version verification failed: $($_.Exception.Message)"
+    if ($Mode -eq "system") {
+        Write-Info "Starting service..."
+        $started = Start-ServiceWait -Name $ServiceName -TimeoutSec 15
+        if (-not $started) {
+            Write-ErrorExit "Service '$ServiceName' did not reach Running state within 15 seconds."
         }
+        Write-OK "Service started"
     } else {
-        Write-ErrorExit "Service '$ServiceName' did not reach Running state within 15 seconds."
+        Write-Info "Starting user background task..."
+        Stop-UserTaskProcess
+        Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction Stop
+
+        $ownedProcessReady = $false
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            if (Test-Path -LiteralPath $PidFile) {
+                $ownedPid = 0
+                [void][int]::TryParse(([IO.File]::ReadAllText($PidFile).Trim()), [ref]$ownedPid)
+                $ownedProcess = if ($ownedPid -gt 0) {
+                    Get-Process -Id $ownedPid -ErrorAction SilentlyContinue
+                } else {
+                    $null
+                }
+                if ($ownedProcess) {
+                    $ownedPath = $null
+                    try { $ownedPath = $ownedProcess.Path } catch { }
+                    if (Test-SamePath -Left $ownedPath -Right $BinPath) {
+                        $ownedProcessReady = $true
+                        break
+                    }
+                }
+            }
+        }
+        if (-not $ownedProcessReady) {
+            throw "The user task did not start an owned Conch process."
+        }
+        Write-OK "User task started and owns process $ownedPid"
+    }
+
+    # Quick health check
+    try {
+        Start-Sleep -Seconds 1
+        $health = Invoke-RestMethod -Uri "http://localhost:$Port/health" -TimeoutSec 5 -ErrorAction SilentlyContinue
+        if (-not $health -or $health.status -ne "ok" -or -not $health.version) {
+            throw "health response is missing status/version"
+        }
+        if ($Version -ne "latest" -and $health.version -ne $Version) {
+            throw "installed version $($health.version) does not match requested $Version"
+        }
+        Write-OK "Health/version check passed: $($health.version)"
+    } catch {
+        Write-ErrorExit "Health/version verification failed: $($_.Exception.Message)"
     }
 } else {
-    Write-Info "Service installed but not started. Start manually:"
-    Write-Info "  Start-Service -Name $ServiceName"
+    Write-Info "Conch installed but not started. Start manually:"
+    if ($Mode -eq "system") {
+        Write-Info "  Start-Service -Name $ServiceName"
+    } else {
+        Write-Info "  Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
+    }
 }
 
 # ============================================================================
@@ -1086,15 +1552,28 @@ Write-Host "  ${Cyan}API key:${Reset}       stored in protected config (not prin
 Write-Host "  ${Cyan}Config file:${Reset}   $EnvFile"
 Write-Host ""
 Write-Host "  ${Cyan}Manage:${Reset}"
-Write-Host "    Stop:        nssm stop $ServiceName"
-Write-Host "    Start:       nssm start $ServiceName"
-Write-Host "    Status:      nssm status $ServiceName"
-Write-Host "    Uninstall:   .\install.ps1 -Uninstall"
-Write-Host ""
-Write-Host "  ${Yellow}Change API key:${Reset} (editing env.txt alone is NOT enough on Windows)"
-Write-Host "    1. Edit config:  notepad $EnvFile"
-Write-Host "    2. Reload env:   nssm set $ServiceName AppEnvironmentExtra (Get-Content $EnvFile)"
-Write-Host "    3. Restart:      nssm restart $ServiceName"
+if ($Mode -eq "system") {
+    Write-Host "    Stop:        nssm stop $ServiceName"
+    Write-Host "    Start:       nssm start $ServiceName"
+    Write-Host "    Status:      nssm status $ServiceName"
+    Write-Host "    Uninstall:   .\install.ps1 -Uninstall -Mode system"
+    Write-Host ""
+    Write-Host "  ${Yellow}Change API key:${Reset} (editing env.txt alone is NOT enough on Windows)"
+    Write-Host "    1. Edit config:  notepad $EnvFile"
+    Write-Host "    2. Reload env:   nssm set $ServiceName AppEnvironmentExtra (Get-Content $EnvFile)"
+    Write-Host "    3. Restart:      nssm restart $ServiceName"
+} else {
+    Write-Host "    Stop:        Stop-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
+    Write-Host "    Start:       Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
+    Write-Host "    Task:        Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
+    Write-Host "    Stdout log:  $LogFile"
+    Write-Host "    Stderr log:  $ErrorLogFile"
+    Write-Host "    Uninstall:   .\install.ps1 -Uninstall -Mode user"
+    Write-Host ""
+    Write-Host "  ${Yellow}Change API key:${Reset}"
+    Write-Host "    1. Edit config:  notepad $EnvFile"
+    Write-Host "    2. Restart:      Stop-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName; Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
+}
 Write-Host ""
 
 } catch {

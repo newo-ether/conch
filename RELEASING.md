@@ -15,8 +15,12 @@ revision, published assets and installed bytes have all been verified.
 4. Commit and push the reviewed changes. Record the implementation and publishing
    executor separately from the configured Git author.
 5. Run the full Linux and Windows tests, race detection, vet, repeated shell /
-   handler / MCP regressions and both installer suites. Build all six targets from
-   the exact clean commit with scripts/build-release.ps1 -Version vX.Y.Z.
+   handler / MCP regressions and both installer suites. The installer suites must
+   cover the user-mode default for new installs, automatic retention of one
+   existing mode during updates, system/user isolation, ambiguous-mode refusal,
+   user-mode install/upgrade/uninstall and rollback of replaced service
+   definitions. Build all six targets from the exact clean commit with
+   scripts/build-release.ps1 -Version vX.Y.Z.
 
 ## Publish and verify
 
