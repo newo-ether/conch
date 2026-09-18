@@ -94,8 +94,6 @@ param(
     [switch]$NoStart       = $false,
     [switch]$Yes           = $false,
     [switch]$Uninstall     = $false,
-    [ValidateSet('system', 'user')]
-    [string]$Mode          = "__unset__"
 )
 
 & {
