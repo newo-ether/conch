@@ -95,11 +95,14 @@ param(
     [switch]$Yes           = $false,
     [switch]$Uninstall     = $false,
     [ValidateSet('system', 'user')]
-    [string]$Mode          = ""
+    [string]$Mode          = "__unset__"
 )
 
 & {
-
+if ($Mode -eq "__unset__") { $Mode = "" }
+if ($Mode -and $Mode -notin @('system', 'user')) {
+    throw "-Mode must be 'system' or 'user' (got '$Mode')."
+}
 try {
 
 $ErrorActionPreference = "Stop"
