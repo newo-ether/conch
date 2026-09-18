@@ -1572,9 +1572,9 @@ if ($Mode -eq "system") {
     Write-Host "    Stderr log:  $ErrorLogFile"
     Write-Host "    Uninstall:   .\install.ps1 -Uninstall -Mode user"
     Write-Host ""
-    Write-Host "  ${Yellow}Change API key:${Reset}"
+    Write-Host "  ${Yellow}Change API key:${Reset} (editing env.txt alone is NOT enough: the launcher reads it at process start)"
     Write-Host "    1. Edit config:  notepad $EnvFile"
-    Write-Host "    2. Restart:      Stop-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName; Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
+    Write-Host "    2. Restart:      Stop-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName; if (Test-Path `"$PidFile`") { Stop-Process -Id (Get-Content `"$PidFile`") -Force -ErrorAction SilentlyContinue }; Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
 }
 Write-Host ""
 
