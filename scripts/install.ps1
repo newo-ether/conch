@@ -93,7 +93,7 @@ param(
     [string]$Prefix        = "",
     [switch]$NoStart       = $false,
     [switch]$Yes           = $false,
-    [switch]$Uninstall     = $false,
+    [switch]$Uninstall     = $false
 )
 
 & {
