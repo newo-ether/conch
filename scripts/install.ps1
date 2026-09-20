@@ -603,13 +603,22 @@ function Protect-SecretFile {
     }
     if ($Mode -eq "user") {
         $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-        $acl = New-Object Security.AccessControl.FileSecurity
-        $acl.SetAccessRuleProtection($true, $false)
-        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
-            [Security.Principal.SecurityIdentifier]'S-1-5-18', 'FullControl', 'Allow')))
-        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
-            $userSid, 'FullControl', 'Allow')))
-        Set-Acl -LiteralPath $Path -AclObject $acl
+        # Rewrite the DACL only, with icacls. Set-Acl persists the owner, group
+        # and SACL sections as well, which requires SeSecurityPrivilege: a
+        # non-elevated user does not hold it, so protecting an already existing
+        # secret file - the in-place upgrade path - fails with
+        # PrivilegeNotHeldException even though user mode needs no administrator.
+        $icaclsArgs = @(
+            $Path,
+            '/inheritance:r',
+            '/grant:r',
+            "*$($userSid.Value):(F)",
+            '*S-1-5-18:(F)'
+        )
+        $icaclsResult = & icacls.exe @icaclsArgs 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "icacls could not restrict $Path (exit code $LASTEXITCODE): $($icaclsResult -join ' ')"
+        }
     } else {
         $acl = New-Object Security.AccessControl.FileSecurity
         $acl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)')
