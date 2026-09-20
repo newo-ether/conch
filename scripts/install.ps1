@@ -783,19 +783,52 @@ foreach ($line in [IO.File]::ReadAllLines($configPath)) {
     }
 }
 
-$child = $null
+$server = $null
 $exitCode = 1
+$adopted = $false
+
+# The server is a grandchild of the task, so it does not die with this launcher:
+# ending the task, logging off, or cleaning up the session can leave it running
+# unsupervised while the pid file still names it. Starting a second server would
+# only lose the race for the port, print one error and truncate the logs, so
+# adopt the running instance instead. Reporting failure once it exits hands the
+# server back to the task's restart policy, which is the supervision this
+# launcher is here to provide.
+if (Test-Path -LiteralPath $pidFile) {
+    $recorded = 0
+    if ([int]::TryParse(([IO.File]::ReadAllText($pidFile)).Trim(), [ref]$recorded) -and $recorded -gt 0) {
+        $candidate = Get-Process -Id $recorded -ErrorAction SilentlyContinue
+        if ($candidate) {
+            $candidatePath = $null
+            try { $candidatePath = $candidate.Path } catch { }
+            if ($candidatePath -and
+                [StringComparer]::OrdinalIgnoreCase.Equals($candidatePath, $serverPath)) {
+                $server = $candidate
+                $adopted = $true
+            }
+        }
+    }
+}
+
 try {
-    $child = Start-Process -FilePath $serverPath -WorkingDirectory $installDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-    [void]$child.Handle
-    [IO.File]::WriteAllText($pidFile, [string]$child.Id, [Text.Encoding]::ASCII)
-    $child.WaitForExit()
-    $child.Refresh()
-    $exitCode = $child.ExitCode
+    if (-not $adopted) {
+        $server = Start-Process -FilePath $serverPath -WorkingDirectory $installDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        [void]$server.Handle
+        [IO.File]::WriteAllText($pidFile, [string]$server.Id, [Text.Encoding]::ASCII)
+    }
+    $server.WaitForExit()
+    $server.Refresh()
+    if ($adopted) {
+        # We never owned this process, so its reported exit code is not ours to
+        # trust; a failure is what re-arms supervision for the next start.
+        $exitCode = 1
+    } else {
+        $exitCode = $server.ExitCode
+    }
 } finally {
-    if (Test-Path -LiteralPath $pidFile) {
+    if (-not $adopted -and (Test-Path -LiteralPath $pidFile)) {
         $recorded = [IO.File]::ReadAllText($pidFile).Trim()
-        if ($child -and $recorded -eq [string]$child.Id) {
+        if ($server -and $recorded -eq [string]$server.Id) {
             Remove-Item -Force -LiteralPath $pidFile -ErrorAction SilentlyContinue
         }
     }
@@ -828,16 +861,44 @@ function New-UserLauncherVbsContent {
     # ASCII only: Windows Script Host reads .vbs as ANSI.
     $template = @'
 Option Explicit
-Dim shell, command, exitCode
+
+' Supervise the server: the launcher runs exactly one server lifetime and exits
+' with that server's exit code, so run it again when it returns. Living in
+' wscript.exe - the task's own action process - means nothing here outlives the
+' task, so stopping the task stops the supervision too.
+Const QuickExitSeconds = 10
+Const RetryDelayMs = 5000
+Const MaxQuickExits = 5
+
+Dim shell, command, quickExits, startedAt, elapsed, exitCode
 Set shell = CreateObject("WScript.Shell")
 command = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""__LAUNCH_SCRIPT__"""
-On Error Resume Next
-exitCode = shell.Run(command, 0, True)
-If Err.Number <> 0 Then
-    WScript.Quit 1
-End If
-On Error GoTo 0
-WScript.Quit exitCode
+
+quickExits = 0
+Do
+    startedAt = Timer
+    On Error Resume Next
+    exitCode = shell.Run(command, 0, True)
+    If Err.Number <> 0 Then
+        exitCode = 1
+        Err.Clear
+    End If
+    On Error GoTo 0
+    elapsed = Timer - startedAt
+
+    If elapsed < QuickExitSeconds Then
+        quickExits = quickExits + 1
+        ' A server that dies within seconds would otherwise be restarted forever,
+        ' truncating its own logs each time: stop hammering and let the task or the
+        ' next logon try again.
+        If quickExits >= MaxQuickExits Then
+            WScript.Quit exitCode
+        End If
+    Else
+        quickExits = 0
+    End If
+    WScript.Sleep RetryDelayMs
+Loop
 '@
 
     $vbs = $template.Replace('__LAUNCH_SCRIPT__', $LaunchScript)
@@ -1681,7 +1742,8 @@ if ($Mode -eq "system") {
     Write-Host "    2. Reload env:   nssm set $ServiceName AppEnvironmentExtra (Get-Content $EnvFile)"
     Write-Host "    3. Restart:      nssm restart $ServiceName"
 } else {
-    Write-Host "    Stop:        Stop-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
+    Write-Host "    Stop task:   Stop-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
+    Write-Host "    Stop server: Stop-Process -Id (Get-Content '$PidFile') -Force"
     Write-Host "    Start:       Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
     Write-Host "    Task:        Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName"
     Write-Host "    Stdout log:  $LogFile"
