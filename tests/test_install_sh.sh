@@ -130,7 +130,7 @@ for marker in \
     'Refusing an implicit migration' \
     'systemctl --user show-environment' \
     'ExecStart="${UNIT_BIN_PATH}"' \
-    'EnvironmentFile="${UNIT_ENV_PATH}"' \
+    'EnvironmentFile=${UNIT_ENV_PATH}' \
     'Failed to enable $MODE-mode auto-start' \
     'Auto-start at user login: enabled' \
     'push_rollback "rm -f -- '\''$BIN_PATH'\''"'
@@ -231,8 +231,15 @@ unit_file="$test_home/.config/systemd/user/conch.service"
 [ -f "$unit_file" ] || { echo "user unit was not created" >&2; exit 1; }
 grep -Fq "ExecStart=\"$test_prefix/conch\"" "$unit_file" ||
     { echo "user unit did not quote ExecStart" >&2; exit 1; }
-grep -Fq "EnvironmentFile=\"$test_prefix/env\"" "$unit_file" ||
-    { echo "user unit did not quote EnvironmentFile" >&2; exit 1; }
+grep -Fq "EnvironmentFile=$test_prefix/env" "$unit_file" ||
+    { echo "user unit did not preserve the EnvironmentFile path" >&2; exit 1; }
+if grep -Fq 'EnvironmentFile="' "$unit_file"; then
+    echo "user unit quoted EnvironmentFile, which systemd treats as a non-absolute path" >&2
+    exit 1
+fi
+if [ -d /run/systemd/system ] && command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze verify "$unit_file" >/dev/null
+fi
 grep -Fq 'CONCH_API_KEY=regression-test-key' "$test_prefix/env" ||
     { echo "user config was not written" >&2; exit 1; }
 

@@ -917,8 +917,8 @@ if [ "$PLATFORM" = "linux" ]; then
     fi
     mkdir -p "$(dirname "${UNIT_FILE}")"
 
-    # Quote systemd paths and escape backslashes, quotes and percent specifiers.
-    # This keeps valid custom prefixes from changing unit tokenization.
+    # ExecStart is tokenized, so quote its path. EnvironmentFile consumes the
+    # remainder as one path and must stay unquoted. Escape percent specifiers in both.
     systemd_escape_path() {
         local escaped="$1"
         escaped="${escaped//\\/\\\\}"
@@ -948,7 +948,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart="${UNIT_BIN_PATH}"
-EnvironmentFile="${UNIT_ENV_PATH}"
+EnvironmentFile=${UNIT_ENV_PATH}
 Restart=always
 RestartSec=5
 StandardOutput=journal
