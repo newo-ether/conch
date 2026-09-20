@@ -327,6 +327,7 @@ $McpBinPath = "$InstallDir\conch-mcp.exe"
 $EnvFile    = "$InstallDir\env.txt"
 $EnvFileTmp = "$InstallDir\env.txt.tmp"
 $LaunchScript = "$InstallDir\launch.ps1"
+$LaunchVbs    = "$InstallDir\launch.vbs"
 $PidFile      = "$InstallDir\conch.pid"
 $LogFile      = "$InstallDir\conch.log"
 $ErrorLogFile = "$InstallDir\conch-error.log"
@@ -814,6 +815,71 @@ try {
         $template = $template.Replace($entry.Key, $entry.Value.Replace("'", "''"))
     }
     return $template
+}
+
+function New-UserLauncherVbsContent {
+    param([string]$LaunchScript)
+
+    # The scheduled task's action must not be a console host. wscript.exe has no
+    # console of its own and starts the PowerShell launcher with window style 0
+    # (hidden), so no window is ever created - unlike powershell.exe with
+    # -WindowStyle Hidden, which shows its console before hiding it. The child's
+    # exit code is passed back so the task's restart-on-failure policy still works.
+    # ASCII only: Windows Script Host reads .vbs as ANSI.
+    $template = @'
+Option Explicit
+Dim shell, command, exitCode
+Set shell = CreateObject("WScript.Shell")
+command = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""__LAUNCH_SCRIPT__"""
+On Error Resume Next
+exitCode = shell.Run(command, 0, True)
+If Err.Number <> 0 Then
+    WScript.Quit 1
+End If
+On Error GoTo 0
+WScript.Quit exitCode
+'@
+
+    $vbs = $template.Replace('__LAUNCH_SCRIPT__', $LaunchScript)
+    return $vbs.Replace("`r`n", "`n").Replace("`n", "`r`n")
+}
+
+function Grant-UserTaskWriteAccess {
+    param([string]$Name)
+
+    # A user-mode task must stay manageable without administrator rights. When
+    # the task is registered from an elevated token - an elevated shell, or the
+    # local SSH server - Windows creates the task file owned by Administrators
+    # with read-only access for the user, so every later non-elevated upgrade
+    # fails with Access is denied. Only an elevated run can repair that, so do
+    # it here, while the privilege is still held.
+    $taskFile = "$env:SystemRoot\System32\Tasks\$Name"
+    if (-not (Test-Path -LiteralPath $taskFile)) { return }
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $isAdmin = ([Security.Principal.WindowsPrincipal]$identity).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) { return }
+
+    try {
+        $acl = Get-Acl -LiteralPath $taskFile
+        $userSidValue = $identity.User.Value
+        # Idempotent: skip whatever already holds, so repeated elevated runs do
+        # not accumulate duplicate ACEs.
+        $ownerIsUser = $acl.Owner -eq $identity.Name
+        $userHasFullControl = $acl.Sddl -match [Regex]::Escape("(A;;FA;;;$userSidValue)")
+        if ($ownerIsUser -and $userHasFullControl) { return }
+        if (-not $ownerIsUser) {
+            $acl.SetOwner($identity.User)
+        }
+        if (-not $userHasFullControl) {
+            $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+                $identity.User, 'FullControl', 'Allow')))
+        }
+        Set-Acl -LiteralPath $taskFile -AclObject $acl
+    } catch {
+        Write-Warn "Could not make the user task writable without elevation: $($_.Exception.Message)"
+    }
 }
 
 # ============================================================================
@@ -1423,6 +1489,13 @@ if ($Mode -eq "system") {
         }
     }
 
+    # The task action must be a GUI-subsystem host: Windows creates a console
+    # window for a console host (powershell.exe) on every task start.
+    $wscriptPath = "$env:SystemRoot\System32\wscript.exe"
+    if (-not (Test-Path -LiteralPath $wscriptPath)) {
+        throw "Windows Script Host is not available: $wscriptPath is missing. User mode needs it to start the server without a console window."
+    }
+
     $launchBackup = "$LaunchScript.previous"
     if (Test-Path -LiteralPath $LaunchScript) {
         Copy-Item -Force -LiteralPath $LaunchScript -Destination $launchBackup
@@ -1439,10 +1512,25 @@ if ($Mode -eq "system") {
     [IO.File]::WriteAllText($LaunchScript, $launch, (New-Object Text.UTF8Encoding($false)))
     Write-OK "Synchronous launcher written: $LaunchScript"
 
+    $launchVbsBackup = "$LaunchVbs.previous"
+    if (Test-Path -LiteralPath $LaunchVbs) {
+        Copy-Item -Force -LiteralPath $LaunchVbs -Destination $launchVbsBackup
+        Push-Rollback {
+            Copy-Item -Force -LiteralPath $launchVbsBackup -Destination $LaunchVbs -ErrorAction SilentlyContinue
+        } "Restore previous hidden launcher"
+    } else {
+        Push-Rollback {
+            Remove-Item -Force -LiteralPath $LaunchVbs -ErrorAction SilentlyContinue
+        } "Remove newly created hidden launcher"
+    }
+
+    $launchVbsContent = New-UserLauncherVbsContent -LaunchScript $LaunchScript
+    [IO.File]::WriteAllText($LaunchVbs, $launchVbsContent, (New-Object Text.UTF8Encoding($false)))
+    Write-OK "Hidden launcher written: $LaunchVbs"
+
     $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
-        '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
-        $LaunchScript + '"'
+    $taskAction = New-ScheduledTaskAction -Execute $wscriptPath -Argument (
+        '//B //Nologo "' + $LaunchVbs + '"'
     )
     $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
     $taskPrincipal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
@@ -1468,13 +1556,32 @@ if ($Mode -eq "system") {
         } "Remove created scheduled task: $TaskName"
     }
 
-    Register-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName `
-        -Action $taskAction `
-        -Trigger $taskTrigger `
-        -Principal $taskPrincipal `
-        -Settings $taskSettings `
-        -Description "Conch Shell Server (user mode, runs as $currentUser)" `
-        -Force | Out-Null
+    try {
+        Register-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName `
+            -Action $taskAction `
+            -Trigger $taskTrigger `
+            -Principal $taskPrincipal `
+            -Settings $taskSettings `
+            -Description "Conch Shell Server (user mode, runs as $currentUser)" `
+            -Force -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Warn "Could not update the scheduled task '$TaskName': $($_.Exception.Message)"
+        Write-Warn "  A task registered earlier from an elevated session is owned by Administrators"
+        Write-Warn "  and cannot be replaced without administrator rights. Remove it once from an"
+        Write-Warn "  elevated PowerShell, then re-run this installer:"
+        Write-Warn "    schtasks /delete /tn $TaskName /f"
+        throw "Scheduled task registration failed: $($_.Exception.Message)"
+    }
+
+    # Register-ScheduledTask reports some failures as non-terminating errors, so
+    # confirm what actually landed instead of trusting the call to have worked.
+    $registeredAction = (Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue).Actions[0].Execute
+    if ($registeredAction -ne $wscriptPath) {
+        throw "Scheduled task '$TaskName' still runs '$registeredAction' instead of the hidden launcher '$wscriptPath'. Remove the stale task from an elevated PowerShell (schtasks /delete /tn $TaskName /f), then re-run this installer."
+    }
+
+    # Keep the task updatable by this user without elevation from now on.
+    Grant-UserTaskWriteAccess -Name $TaskName
 
     Write-OK "Scheduled task registered: $TaskName (owns the server process and restarts on failure)"
 }
