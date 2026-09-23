@@ -311,4 +311,21 @@ Durable execution uses `shell_start`, `shell_jobs`, `shell_job_get`, `shell_job_
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Copyright (c) 2026 Newo Ether.
+
+The current Conch source is licensed under the **GNU General Public License,
+version 3 only (SPDX: GPL-3.0-only)**. See [LICENSE](LICENSE) for the full terms.
+This declaration applies to project-owned source, scripts and documentation unless
+a file explicitly states another license. Third-party components retain their own
+copyright and license terms; see [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
+
+Forks and commercial use are welcome. When distributing covered modified versions,
+preserve copyright and license notices, identify modifications, and provide the
+complete corresponding source under GPLv3. The project license does not imply
+upstream endorsement of a modified distribution.
+
+The MIT grant on already-published Conch code remains valid. The last pre-transition
+main revision is [19d910e9500092dd310e7d0cb2224c6ac7fdefb5](https://github.com/newo-ether/conch/tree/19d910e9500092dd310e7d0cb2224c6ac7fdefb5),
+whose [historical MIT license](https://github.com/newo-ether/conch/blob/19d910e9500092dd310e7d0cb2224c6ac7fdefb5/LICENSE)
+continues to cover that revision and earlier MIT releases. The current project is
+not offered as a choice between MIT and GPL. This change applies prospectively.

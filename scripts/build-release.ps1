@@ -73,7 +73,13 @@ try {
     $env:CGO_ENABLED = $oldCGO
 }
 
-$checksumNames = [string[]]@($targets | ForEach-Object { $_.Name })
+$legalNames = @("LICENSE", "THIRD_PARTY_NOTICES.txt")
+foreach ($name in $legalNames) {
+    Copy-Item -LiteralPath (Join-Path $RepoRoot $name) -Destination (Join-Path $resolvedOutput $name)
+}
+$sourceNotice = "Conch $Version - GPL-3.0-only`nCopyright (c) 2026 Newo Ether.`nCorresponding source: https://github.com/newo-ether/conch/archive/$Revision.tar.gz`nBuild instructions: README.md and RELEASING.md in that source archive.`nDependencies and exact versions: go.mod and go.sum in that source archive.`n"
+[IO.File]::WriteAllText((Join-Path $resolvedOutput "SOURCE.txt"), $sourceNotice, [Text.UTF8Encoding]::new($false))
+$checksumNames = [string[]](@($targets | ForEach-Object { $_.Name }) + $legalNames + @("SOURCE.txt"))
 [Array]::Sort($checksumNames, [StringComparer]::Ordinal)
 $checksumLines = foreach ($name in $checksumNames) {
     $path = Join-Path $resolvedOutput $name

@@ -60,7 +60,9 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/conch-mcp-linux-arm64 ./cmd/mcp
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/conch-mcp-linux-amd64 ./cmd/mcp
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$ldflags" -o dist/conch-mcp-windows-amd64.exe ./cmd/mcp
-          (cd dist && sha256sum conch-* > checksums.txt)
+          cp LICENSE THIRD_PARTY_NOTICES.txt dist/
+          printf 'Conch %s - GPL-3.0-only\nCopyright (c) 2026 Newo Ether.\nCorresponding source: https://github.com/newo-ether/conch/archive/%s.tar.gz\nBuild instructions: README.md and RELEASING.md in that source archive.\nDependencies and exact versions: go.mod and go.sum in that source archive.\n' "$VERSION" "$revision" > dist/SOURCE.txt
+          (cd dist && sha256sum LICENSE SOURCE.txt THIRD_PARTY_NOTICES.txt conch-* > checksums.txt)
           ./dist/conch-linux-amd64 --version | grep -F "$VERSION"
           ./dist/conch-mcp-linux-amd64 --version | grep -F "$VERSION"
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
@@ -73,6 +75,9 @@ jobs:
             dist/conch-mcp-linux-amd64
             dist/conch-mcp-windows-amd64.exe
             dist/checksums.txt
+            dist/LICENSE
+            dist/THIRD_PARTY_NOTICES.txt
+            dist/SOURCE.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-assets

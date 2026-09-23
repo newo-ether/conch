@@ -29,7 +29,10 @@ revision, published assets and installed bytes have all been verified.
 2. Push that tag to run .github/workflows/release.yml. Wait for successful tests,
    deterministic builds, metadata smokes, provenance attestation and publication.
 3. Read the non-draft, non-prerelease GitHub Release back. It must contain the six
-   supported binaries and checksums.txt from the same tag.
+   supported binaries, LICENSE, THIRD_PARTY_NOTICES.txt, SOURCE.txt and checksums.txt
+   from the same tag. SOURCE.txt identifies the exact corresponding source archive.
+   Keep license/source links with binary downloads; dependency notices retain their
+   original terms. Refresh THIRD_PARTY_NOTICES.txt whenever dependencies change.
 4. Independently download every published asset. Check its SHA-256 against the
    manifest, the GitHub asset digest and the local deterministic build; verify
    GitHub provenance. A successful workflow alone is not this verification.
