@@ -38,7 +38,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	retentionHours, err := envInt("CONCH_JOB_RETENTION_HOURS", 168)
+	retentionHours, err := envInt("CONCH_JOB_RETENTION_HOURS", 24)
 	if err != nil {
 		return nil, err
 	}

@@ -15,6 +15,7 @@ DEFAULT_PORT=14216
 DEFAULT_HOST="0.0.0.0"
 DEFAULT_TIMEOUT=30
 DEFAULT_MAX_TIMEOUT=1800
+DEFAULT_JOB_RETENTION_HOURS=24
 DEFAULT_RELEASE_VERSION="latest"
 
 # ============================================================================
@@ -211,11 +212,13 @@ PORT_SET=false
 HOST_SET=false
 TIMEOUT_SET=false
 MAX_TIMEOUT_SET=false
+JOB_RETENTION_HOURS_SET=false
 NO_AUTH_SET=false
 PORT="${DEFAULT_PORT}"
 HOST="${DEFAULT_HOST}"
 TIMEOUT="${DEFAULT_TIMEOUT}"
 MAX_TIMEOUT="${DEFAULT_MAX_TIMEOUT}"
+JOB_RETENTION_HOURS="${DEFAULT_JOB_RETENTION_HOURS}"
 ALLOW_NO_AUTH="false"
 SRC_BIN=""
 SRC_MCP=""
@@ -243,6 +246,9 @@ while [ $# -gt 0 ]; do
         --max-timeout)
             [ $# -ge 2 ] || die "--max-timeout requires a value"
             MAX_TIMEOUT="$2"; MAX_TIMEOUT_SET=true; shift 2 ;;
+        --job-retention-hours)
+            [ $# -ge 2 ] || die "--job-retention-hours requires a value"
+            JOB_RETENTION_HOURS="$2"; JOB_RETENTION_HOURS_SET=true; shift 2 ;;
         --no-auth)       ALLOW_NO_AUTH="true"; NO_AUTH_SET=true; shift ;;
         --prefix)
             [ $# -ge 2 ] || die "--prefix requires a value"
@@ -269,6 +275,7 @@ while [ $# -gt 0 ]; do
             echo "  --host ADDR        Listen address (default: ${DEFAULT_HOST})"
             echo "  --timeout SEC      Command timeout seconds (default: ${DEFAULT_TIMEOUT})"
             echo "  --max-timeout SEC  Max timeout seconds (default: ${DEFAULT_MAX_TIMEOUT})"
+            echo "  --job-retention-hours H  Hours to retain completed background jobs (default: ${DEFAULT_JOB_RETENTION_HOURS})"
             echo "  --no-auth          Disable authentication (dev only)"
             echo "  --prefix DIR       Install root directory"
             echo "  --bin PATH         Use pre-built binary"
@@ -294,6 +301,8 @@ fi
     die "--timeout must be an integer between 1 and 604800"
 [[ "$MAX_TIMEOUT" =~ ^[0-9]+$ ]] && (( 10#$MAX_TIMEOUT >= 1 && 10#$MAX_TIMEOUT <= 604800 )) ||
     die "--max-timeout must be an integer between 1 and 604800"
+[[ "$JOB_RETENTION_HOURS" =~ ^[0-9]+$ ]] && (( 10#$JOB_RETENTION_HOURS >= 0 && 10#$JOB_RETENTION_HOURS <= 8760 )) ||
+    die "--job-retention-hours must be an integer between 0 and 8760"
 (( 10#$TIMEOUT <= 10#$MAX_TIMEOUT )) || die "--timeout must not exceed --max-timeout"
 [ -n "$HOST" ] || die "--host must not be empty"
 for config_value in "$API_KEY" "$HOST"; do
@@ -648,7 +657,7 @@ if $EXISTING; then
         EXISTING_CONFIG_SHA256="$(file_sha256 "$ENV_FILE")" ||
             die "Cannot verify existing configuration before upgrade"
         if $API_KEY_SET || $PORT_SET || $HOST_SET || $TIMEOUT_SET ||
-           $MAX_TIMEOUT_SET || $NO_AUTH_SET; then
+           $MAX_TIMEOUT_SET || $NO_AUTH_SET || $JOB_RETENTION_HOURS_SET; then
             die "Configuration override flags cannot be used during an in-place upgrade. Existing configuration will not be overwritten."
         fi
         existing_api_key="$(grep -E '^CONCH_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
@@ -884,6 +893,7 @@ CONCH_HOST=$HOST
 CONCH_TIMEOUT=$TIMEOUT
 CONCH_MAX_TIMEOUT=$MAX_TIMEOUT
 CONCH_ALLOW_NO_AUTH=$ALLOW_NO_AUTH
+CONCH_JOB_RETENTION_HOURS=$JOB_RETENTION_HOURS
 EOF
     chmod 600 "$ENV_FILE.tmp.$$"
     mv -f "$ENV_FILE.tmp.$$" "$ENV_FILE"

@@ -21,6 +21,8 @@
 
 .PARAMETER MaxTimeoutSec
     Maximum command timeout in seconds. Default: 1800.
+.PARAMETER JobRetentionHours
+    Hours to retain completed background jobs before eviction. Default: 24.
 
 .PARAMETER NoAuth
     Disable authentication. Insecure, dev only.
@@ -85,6 +87,8 @@ param(
     [int]   $TimeoutSec    = 30,
     [ValidateRange(1, 604800)]
     [int]   $MaxTimeoutSec = 1800,
+    [ValidateRange(0, 8760)]
+    [int]   $JobRetentionHours = 24,
     [switch]$NoAuth        = $false,
     [string]$BinaryPath    = "",
     [string]$McpBinaryPath = "",
@@ -1425,6 +1429,7 @@ if (Test-Path $EnvFile) {
     $configLines.Add("CONCH_HOST=$HostAddr")
     $configLines.Add("CONCH_TIMEOUT=$TimeoutSec")
     $configLines.Add("CONCH_MAX_TIMEOUT=$MaxTimeoutSec")
+    $configLines.Add("CONCH_JOB_RETENTION_HOURS=$JobRetentionHours")
     $configLines.Add("CONCH_ALLOW_NO_AUTH=$($NoAuth.ToString().ToLowerInvariant())")
 }
 
@@ -1439,6 +1444,9 @@ if ($PSBoundParameters.ContainsKey("TimeoutSec")) {
 }
 if ($PSBoundParameters.ContainsKey("MaxTimeoutSec")) {
     Set-EnvValue $configLines "CONCH_MAX_TIMEOUT" $MaxTimeoutSec
+}
+if ($PSBoundParameters.ContainsKey("JobRetentionHours")) {
+    Set-EnvValue $configLines "CONCH_JOB_RETENTION_HOURS" $JobRetentionHours
 }
 if ($PSBoundParameters.ContainsKey("NoAuth")) {
     Set-EnvValue $configLines "CONCH_ALLOW_NO_AUTH" $NoAuth.ToString().ToLowerInvariant()

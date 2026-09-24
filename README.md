@@ -146,7 +146,7 @@ curl -s http://localhost:14216/health
 | `CONCH_TIMEOUT` | `30` | Default command timeout in seconds |
 | `CONCH_MAX_TIMEOUT` | `1800` | Maximum allowed timeout in seconds (30 minutes) |
 | `CONCH_JOB_DIR` | OS user config directory | Directory containing durable background-job snapshots |
-| `CONCH_JOB_RETENTION_HOURS` | `168` | Retain completed background jobs for this many hours |
+| `CONCH_JOB_RETENTION_HOURS` | `24` | Retain completed background jobs for this many hours |
 | `CONCH_MAX_JOB_TIMEOUT_SECONDS` | `86400` | Maximum runtime of one background job |
 | `CONCH_MAX_JOB_OUTPUT_BYTES` | `262144` | Maximum rolling output retained per job |
 | `CONCH_MAX_JOBS` | `100` | Maximum retained job snapshots; running jobs are never evicted |
