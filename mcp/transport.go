@@ -467,7 +467,9 @@ type FileReadResult struct {
 	TotalLines int    `json:"totalLines"`
 	Size       int64  `json:"size"`
 	Truncated  bool   `json:"truncated"`
-	Error      string `json:"error,omitempty"`
+	// BytesRead is 0 from servers that predate the field.
+	BytesRead int64  `json:"bytesRead"`
+	Error     string `json:"error,omitempty"`
 }
 
 // FileImageResult is the decrypted binary-safe response from POST /file/image.
@@ -487,9 +489,37 @@ type FileMutationResult struct {
 
 // GrepMatchResult is one match from POST /file/grep.
 type GrepMatchResult struct {
-	Path    string `json:"path"`
-	Line    int    `json:"line"`
-	Content string `json:"content"`
+	Path    string   `json:"path"`
+	Line    int      `json:"line"`
+	Content string   `json:"content"`
+	Before  []string `json:"before,omitempty"`
+	After   []string `json:"after,omitempty"`
+}
+
+// FileGrepOptions is the request for POST /file/grep. Older servers ignore
+// CaseInsensitive and Context; ContextSupported in the result tells them apart.
+type FileGrepOptions struct {
+	Pattern         string `json:"pattern"`
+	Path            string `json:"path"`
+	Glob            string `json:"glob"`
+	CaseInsensitive bool   `json:"case_insensitive,omitempty"`
+	Context         int    `json:"context,omitempty"`
+}
+
+// FileGrepResult is the decrypted response from POST /file/grep.
+type FileGrepResult struct {
+	Matches           []GrepMatchResult `json:"matches"`
+	Truncated         bool              `json:"truncated"`
+	SkippedLargeFiles int               `json:"skippedLargeFiles"`
+	ContextSupported  bool              `json:"contextSupported"`
+	Error             string            `json:"error,omitempty"`
+}
+
+// FileEditOperation is one replacement inside a batched /file/edit request.
+type FileEditOperation struct {
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
 }
 
 // FileRead sends a file read request.
@@ -601,6 +631,39 @@ func (t *Transport) FileEdit(
 	return &result, nil
 }
 
+// FileEditBatch applies several edits atomically on the target host. Servers
+// without batch support reject the request with "old_string is required", which
+// is mapped to an explicit upgrade hint.
+func (t *Transport) FileEditBatch(
+	ctx context.Context,
+	path string,
+	edits []FileEditOperation,
+	expectedSHA256 string,
+) (*FileMutationResult, error) {
+	body, err := json.Marshal(map[string]interface{}{
+		"path":            path,
+		"edits":           edits,
+		"expected_sha256": expectedSHA256,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result FileMutationResult
+	if err := t.doFileRequest(ctx, "/file/edit", body, &result); err != nil {
+		return nil, err
+	}
+	if result.Error == "old_string is required" {
+		return nil, fmt.Errorf("target Conch server does not support batched edits; upgrade it or send one edit per call")
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+	if !result.OK || result.Replacements <= 0 || result.SHA256 == "" {
+		return nil, fmt.Errorf("server returned incomplete file edit result")
+	}
+	return &result, nil
+}
+
 // FileGlob sends a file glob request. Returns matching paths.
 func (t *Transport) FileGlob(
 	ctx context.Context,
@@ -629,32 +692,19 @@ func (t *Transport) FileGlob(
 }
 
 // FileGrep sends a file grep request. Returns matching lines.
-func (t *Transport) FileGrep(
-	ctx context.Context,
-	pattern string,
-	basePath string,
-	fileGlob string,
-) ([]GrepMatchResult, bool, error) {
-	body, err := json.Marshal(map[string]string{
-		"pattern": pattern,
-		"path":    basePath,
-		"glob":    fileGlob,
-	})
+func (t *Transport) FileGrep(ctx context.Context, opts FileGrepOptions) (*FileGrepResult, error) {
+	body, err := json.Marshal(opts)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	var result struct {
-		Matches   []GrepMatchResult `json:"matches"`
-		Truncated bool              `json:"truncated"`
-		Error     string            `json:"error,omitempty"`
-	}
+	var result FileGrepResult
 	if err := t.doFileRequest(ctx, "/file/grep", body, &result); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if result.Error != "" {
-		return nil, false, fmt.Errorf("%s", result.Error)
+		return nil, fmt.Errorf("%s", result.Error)
 	}
-	return result.Matches, result.Truncated, nil
+	return &result, nil
 }
 
 // Only read operations may retry after authenticated stale-key rejection.

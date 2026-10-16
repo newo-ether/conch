@@ -5,6 +5,32 @@ All notable changes to Conch are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [1.0.20] - 2026-10-16
+### Added
+- `file_edit` accepts an `edits` array of up to 100 ordered replacements applied
+  atomically: every edit sees the previous result and nothing is written if any
+  edit fails. The response reports `edits`; single-edit requests and error text
+  are unchanged.
+- `file_grep` accepts `case_insensitive` and `context` (0-10 lines before and
+  after each match), reports `skippedLargeFiles` for candidates over 500KB and
+  advertises `contextSupported`.
+- `file_read` reports `bytesRead`, the raw bytes consumed including split UTF-8
+  bytes trimmed from either end, so clients can page exactly.
+- Capabilities `file_edit_batch`, `file_grep_context` and `file_read_bytes_read`.
+### Fixed
+- `file_read` fills the requested slice with a full read and trims only a rune
+  actually cut by the slice end; invalid bytes are returned instead of stalling
+  paging, and a leading partial rune is no longer confused with a trailing one.
+- `file_grep` no longer aborts the whole search on a line over the scanner limit,
+  truncates long lines on a UTF-8 boundary, applies doublestar glob semantics
+  (basename at any depth without `/`, `**` across directories), and skips `.git`,
+  `.hg` and `.svn`.
+- `file_glob` and `file_grep` report `truncated` only when results were actually
+  dropped, not when exactly hitting the cap; `file_glob` skips VCS directories.
+### Compatibility
+- Older clients are unaffected. Newer clients detect batch edit support from the
+  `edits` response field and context support from `contextSupported`, and keep
+  working against v1.0.19 servers with an explicit upgrade hint.
 
 ## [1.0.19] - 2026-09-15
 
@@ -177,7 +203,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.19...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.20...HEAD
+[1.0.20]: https://github.com/newo-ether/conch/compare/v1.0.19...v1.0.20
 [1.0.19]: https://github.com/newo-ether/conch/compare/v1.0.18...v1.0.19
 [1.0.18]: https://github.com/newo-ether/conch/compare/v1.0.17...v1.0.18
 [1.0.17]: https://github.com/newo-ether/conch/compare/v1.0.16...v1.0.17

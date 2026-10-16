@@ -72,6 +72,8 @@ type JSONProp struct {
 	Default     any    `json:"default,omitempty"`
 	Minimum     int    `json:"minimum,omitempty"`
 	Maximum     int    `json:"maximum,omitempty"`
+	// Items describes array elements when Type is "array".
+	Items *JSONSchema `json:"items,omitempty"`
 }
 
 type ToolCallParams struct {

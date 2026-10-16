@@ -15,6 +15,9 @@ var Capabilities = []string{
 	"durable_shell_jobs",
 	"encrypted_sse_v1",
 	"expected_sha256",
+	"file_edit_batch",
+	"file_grep_context",
+	"file_read_bytes_read",
 	"job_ack",
 	"key_refresh",
 }

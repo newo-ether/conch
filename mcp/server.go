@@ -148,18 +148,31 @@ var allTools = []Tool{
 	},
 	{
 		Name:        "file_edit",
-		Description: "Edit a file on a remote device by replacing old_string with new_string. The old_string must match exactly once in the file (or set replace_all to replace all occurrences).",
+		Description: "Edit a file on a remote device by replacing old_string with new_string. The old_string must match exactly once in the file (or set replace_all to replace all occurrences). For several changes to one file, pass edits instead: they apply in order and nothing is written unless every edit succeeds.",
 		InputSchema: JSONSchema{
 			Type: "object",
 			Properties: map[string]JSONProp{
 				"device":          {Type: "string", Description: "The target device name"},
 				"path":            {Type: "string", Description: "Absolute path to the file"},
-				"old_string":      {Type: "string", Description: "The exact text to find and replace"},
-				"new_string":      {Type: "string", Description: "The replacement text"},
+				"old_string":      {Type: "string", Description: "The exact text to find and replace (required unless edits is given)"},
+				"new_string":      {Type: "string", Description: "The replacement text (required unless edits is given)"},
 				"replace_all":     {Type: "boolean", Description: "Replace all occurrences instead of requiring a unique match (default: false)"},
 				"expected_sha256": {Type: "string", Description: "Optional SHA-256 precondition; the edit fails if the current file differs"},
+				"edits": {
+					Type:        "array",
+					Description: "Optional ordered batch of edits applied atomically; each sees the result of the previous ones. Cannot be combined with old_string/new_string/replace_all.",
+					Items: &JSONSchema{
+						Type: "object",
+						Properties: map[string]JSONProp{
+							"old_string":  {Type: "string", Description: "The exact text to find"},
+							"new_string":  {Type: "string", Description: "The replacement text"},
+							"replace_all": {Type: "boolean", Description: "Replace all occurrences (default: false)"},
+						},
+						Required: []string{"old_string", "new_string"},
+					},
+				},
 			},
-			Required: []string{"device", "path", "old_string", "new_string"},
+			Required: []string{"device", "path"},
 		},
 	},
 	{
@@ -181,10 +194,12 @@ var allTools = []Tool{
 		InputSchema: JSONSchema{
 			Type: "object",
 			Properties: map[string]JSONProp{
-				"device":  {Type: "string", Description: "The target device name"},
-				"pattern": {Type: "string", Description: "Regular expression pattern to search for (RE2 syntax)"},
-				"path":    {Type: "string", Description: "File or directory to search in (optional, defaults to current directory)"},
-				"glob":    {Type: "string", Description: "Filter files by glob pattern, e.g. '*.go' (optional)"},
+				"device":           {Type: "string", Description: "The target device name"},
+				"pattern":          {Type: "string", Description: "Regular expression pattern to search for (RE2 syntax)"},
+				"path":             {Type: "string", Description: "File or directory to search in (optional, defaults to current directory)"},
+				"glob":             {Type: "string", Description: "Filter files by glob pattern, e.g. '*.go' or 'src/**/*.kt' (optional)"},
+				"case_insensitive": {Type: "boolean", Description: "Match case-insensitively (default: false)"},
+				"context":          {Type: "integer", Description: "Lines of context before and after each match (0-10, default 0)", Minimum: 0, Maximum: 10},
 			},
 			Required: []string{"device", "pattern"},
 		},
@@ -807,6 +822,25 @@ func (s *Server) doFileEdit(ctx context.Context, t *Transport, args map[string]i
 	if path == "" {
 		return errorResult("path is required"), nil
 	}
+	if rawEdits, present := args["edits"]; present && rawEdits != nil {
+		edits, parseErr := parseFileEditOperations(rawEdits)
+		if parseErr != "" {
+			return errorResult(parseErr), nil
+		}
+		if oldStr != "" || newStr != "" || replaceAll {
+			return errorResult("edits cannot be combined with old_string, new_string or replace_all"), nil
+		}
+		result, err := t.FileEditBatch(ctx, path, edits, expectedSHA256)
+		if err != nil {
+			return errorResult(fmt.Sprintf("file_edit error: %v", err)), nil
+		}
+		return textResult(fmt.Sprintf(
+			"applied %d edits, %d replacements (sha256 %s)",
+			len(edits),
+			result.Replacements,
+			result.SHA256,
+		)), nil
+	}
 	if oldStr == "" {
 		return errorResult("old_string is required"), nil
 	}
@@ -860,32 +894,91 @@ func (s *Server) doFileGrep(ctx context.Context, t *Transport, args map[string]i
 	pattern, _ := args["pattern"].(string)
 	basePath, _ := args["path"].(string)
 	fileGlob, _ := args["glob"].(string)
+	caseInsensitive, _ := args["case_insensitive"].(bool)
+	contextLines := 0
+	if v, ok := args["context"].(float64); ok {
+		contextLines = min(max(int(v), 0), 10)
+	}
 	if pattern == "" {
 		return errorResult("pattern is required"), nil
 	}
 
-	matches, truncated, err := t.FileGrep(ctx, pattern, basePath, fileGlob)
+	result, err := t.FileGrep(ctx, FileGrepOptions{
+		Pattern:         pattern,
+		Path:            basePath,
+		Glob:            fileGlob,
+		CaseInsensitive: caseInsensitive,
+		Context:         contextLines,
+	})
 	if err != nil {
 		return errorResult(fmt.Sprintf("file_grep error: %v", err)), nil
 	}
 	text := "(no matches)"
-	if len(matches) > 0 {
+	if len(result.Matches) > 0 {
 		var sb strings.Builder
-		for _, m := range matches {
+		for i, m := range result.Matches {
+			if contextLines > 0 && i > 0 {
+				sb.WriteString("--\n")
+			}
+			for j, line := range m.Before {
+				sb.WriteString(fmt.Sprintf("%s-%d- %s\n", m.Path, m.Line-len(m.Before)+j, line))
+			}
 			sb.WriteString(fmt.Sprintf("%s:%d: %s\n", m.Path, m.Line, m.Content))
+			for j, line := range m.After {
+				sb.WriteString(fmt.Sprintf("%s-%d- %s\n", m.Path, m.Line+1+j, line))
+			}
 		}
 		text = strings.TrimSpace(sb.String())
 	}
 	content := []ContentItem{{Type: "text", Text: text}}
-	if truncated {
+	if result.Truncated {
 		content = append(content, ContentItem{
 			Type: "text",
 			Text: "Warning: file_grep results were truncated at 500 matches",
 		})
 	}
+	if result.SkippedLargeFiles > 0 {
+		content = append(content, ContentItem{
+			Type: "text",
+			Text: fmt.Sprintf("Note: %d files over 500KB were not searched", result.SkippedLargeFiles),
+		})
+	}
+	if contextLines > 0 && !result.ContextSupported {
+		content = append(content, ContentItem{
+			Type: "text",
+			Text: "Note: the target Conch server is older and returned no context lines",
+		})
+	}
 	return ToolCallResult{
 		Content: content,
 	}, nil
+}
+
+// parseFileEditOperations converts the JSON-decoded edits argument. The returned
+// string is a client-facing error, empty on success.
+func parseFileEditOperations(raw interface{}) ([]FileEditOperation, string) {
+	items, ok := raw.([]interface{})
+	if !ok {
+		return nil, "edits must be an array"
+	}
+	if len(items) == 0 {
+		return nil, "edits must not be empty"
+	}
+	edits := make([]FileEditOperation, 0, len(items))
+	for i, item := range items {
+		obj, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Sprintf("edits[%d] must be an object", i)
+		}
+		oldStr, _ := obj["old_string"].(string)
+		if oldStr == "" {
+			return nil, fmt.Sprintf("edits[%d]: old_string is required", i)
+		}
+		newStr, _ := obj["new_string"].(string)
+		replaceAll, _ := obj["replace_all"].(bool)
+		edits = append(edits, FileEditOperation{OldString: oldStr, NewString: newStr, ReplaceAll: replaceAll})
+	}
+	return edits, ""
 }
 
 // --- helpers ---

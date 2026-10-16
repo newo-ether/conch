@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -32,6 +31,9 @@ const grepMaxFileSize = 500 * 1024
 // grepMaxContentLen truncates a returned matching line, matching the other backends.
 const grepMaxContentLen = 500
 
+// grepMaxMatches bounds /file/grep results.
+const grepMaxMatches = 500
+
 const maxFileSearchDuration = 30 * time.Second
 
 // FileReadRequest is the decrypted body for POST /file/read.
@@ -47,6 +49,11 @@ type FileReadResponse struct {
 	TotalLines int    `json:"totalLines"`
 	Size       int64  `json:"size"`
 	Truncated  bool   `json:"truncated"`
+	// BytesRead is the number of raw file bytes consumed from Offset, including any
+	// leading continuation bytes dropped by UTF-8 trimming. Clients paging through a
+	// file continue at Offset+BytesRead; len(Content) can differ when the file holds
+	// invalid UTF-8 that JSON encoding replaces.
+	BytesRead int64 `json:"bytesRead"`
 }
 
 // FileImageRequest is the decrypted body for POST /file/image.
@@ -78,12 +85,29 @@ type FileEditRequest struct {
 	NewString      string `json:"new_string"`
 	ReplaceAll     bool   `json:"replace_all"`
 	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
+	// Edits applies several replacements in order to the in-memory content and
+	// writes once; any failing edit aborts the whole request. It is mutually
+	// exclusive with the single-edit OldString/NewString/ReplaceAll fields.
+	Edits []FileEditOperation `json:"edits,omitempty"`
 }
+
+// FileEditOperation is one replacement inside a batched FileEditRequest.
+type FileEditOperation struct {
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
+}
+
+// maxFileEditOperations bounds the work a single batched edit request can demand.
+const maxFileEditOperations = 100
 
 type FileEditResponse struct {
 	OK           bool   `json:"ok"`
 	Replacements int    `json:"replacements"`
 	SHA256       string `json:"sha256"`
+	// Edits is the number of edit operations applied; older servers omit it,
+	// which lets clients detect batched-edit support from a response.
+	Edits int `json:"edits"`
 }
 
 // FileGlobRequest is the decrypted body for POST /file/glob.
@@ -103,22 +127,46 @@ type FileGlobResponse struct {
 }
 
 // FileGrepRequest is the decrypted body for POST /file/grep.
+// Glob uses the same semantics as /file/glob: a pattern without '/' matches file
+// basenames at any depth, otherwise it matches the path relative to Path ('**'
+// supported). Context requests up to grepMaxContextLines lines before and after
+// each match.
 type FileGrepRequest struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path"`
-	Glob    string `json:"glob"`
+	Pattern         string `json:"pattern"`
+	Path            string `json:"path"`
+	Glob            string `json:"glob"`
+	CaseInsensitive bool   `json:"case_insensitive,omitempty"`
+	Context         int    `json:"context,omitempty"`
 }
 
 type GrepMatch struct {
-	Path    string `json:"path"`
-	Line    int    `json:"line"`
-	Content string `json:"content"`
+	Path    string   `json:"path"`
+	Line    int      `json:"line"`
+	Content string   `json:"content"`
+	Before  []string `json:"before,omitempty"`
+	After   []string `json:"after,omitempty"`
 }
 
 type FileGrepResponse struct {
 	Matches   []GrepMatch `json:"matches"`
 	Truncated bool        `json:"truncated"`
+	// SkippedLargeFiles counts candidate files skipped for exceeding grepMaxFileSize,
+	// so an empty result is never silently ambiguous.
+	SkippedLargeFiles int `json:"skippedLargeFiles"`
+	// ContextSupported lets clients distinguish this server from older ones that
+	// silently ignore the Context field.
+	ContextSupported bool `json:"contextSupported"`
 }
+
+// grepMaxContextLines bounds the context lines returned on each side of a match.
+const grepMaxContextLines = 10
+
+// fileSearchMaxGlobMatches bounds /file/glob results.
+const fileSearchMaxGlobMatches = 1000
+
+// fileSearchSkippedDirs are version-control metadata directories that file search
+// never descends into below the requested root.
+var fileSearchSkippedDirs = map[string]bool{".git": true, ".hg": true, ".svn": true}
 
 // decryptBody handles the shared encryption-detection logic.
 func decryptBody(r *http.Request, bodyBytes []byte, apiKey []byte, keyPair *crypto.KeyPair) ([]byte, []byte, error) {
@@ -239,29 +287,37 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	buf := make([]byte, req.Limit)
-	n, err := f.Read(buf)
-	if err != nil && err != io.EOF {
+	// A single Read may legally return fewer bytes than requested before EOF; fill
+	// the buffer so callers never mistake a short read for the end of the range.
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("read: %v", err)}, aesKey)
 		return
 	}
-	// Trim incomplete UTF-8 sequences at both ends: Limit may cut a multi-byte
-	// rune in the middle, and a caller offset may land inside one. Returned
-	// content is always valid UTF-8 so the JSON envelope and clients never see
-	// U+FFFD replacement noise. The two ends are handled independently: a
-	// leading byte that cannot start a rune is dropped one at a time, then a
-	// trailing partial rune is dropped one byte at a time.
+	// Trim split UTF-8 sequences at both ends: a caller offset may land inside a
+	// rune, and Limit may cut one. Only genuinely split runes are trimmed, never
+	// invalid bytes, so BytesRead always resumes exactly where the next rune
+	// starts and paging can neither skip data nor stall on a corrupt byte.
+	//   - Leading: drop at most UTFMax-1 continuation bytes.
+	//   - Trailing: drop a final rune prefix that is incomplete only because the
+	//     read stopped early; at end of file it is kept as-is.
 	contentBytes := buf[:n]
-	for len(contentBytes) > 0 {
-		if r, size := utf8.DecodeRune(contentBytes); r != utf8.RuneError || size != 1 {
-			break
-		}
+	leadingDropped := 0
+	for leadingDropped < utf8.UTFMax-1 && len(contentBytes) > 0 && !utf8.RuneStart(contentBytes[0]) {
 		contentBytes = contentBytes[1:]
+		leadingDropped++
 	}
-	for len(contentBytes) > 0 {
-		if r, size := utf8.DecodeLastRune(contentBytes); r != utf8.RuneError || size != 1 {
+	if req.Offset+int64(n) < info.Size() {
+		for k := 1; k <= min(utf8.UTFMax-1, len(contentBytes)); k++ {
+			start := len(contentBytes) - k
+			if !utf8.RuneStart(contentBytes[start]) {
+				continue
+			}
+			if !utf8.FullRune(contentBytes[start:]) {
+				contentBytes = contentBytes[:start]
+			}
 			break
 		}
-		contentBytes = contentBytes[:len(contentBytes)-1]
 	}
 	content := string(contentBytes)
 
@@ -292,6 +348,7 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		TotalLines: totalLines,
 		Size:       info.Size(),
 		Truncated:  truncated,
+		BytesRead:  int64(leadingDropped + len(contentBytes)),
 	}
 	writeJSONResponse(w, resp, aesKey)
 }
@@ -533,6 +590,78 @@ func withFileEditLineEnding(text string, lineEnding string) string {
 	return strings.ReplaceAll(normalized, "\n", lineEnding)
 }
 
+// fileEditOperations normalizes a request into an ordered list of edits. The
+// legacy single-edit fields and the batched Edits array are mutually exclusive.
+// The returned string is a client-facing error, empty on success.
+func fileEditOperations(req FileEditRequest) ([]FileEditOperation, string) {
+	if len(req.Edits) == 0 {
+		if req.OldString == "" {
+			return nil, "old_string is required"
+		}
+		return []FileEditOperation{{
+			OldString:  req.OldString,
+			NewString:  req.NewString,
+			ReplaceAll: req.ReplaceAll,
+		}}, ""
+	}
+	if req.OldString != "" || req.NewString != "" || req.ReplaceAll {
+		return nil, "edits cannot be combined with old_string, new_string or replace_all"
+	}
+	if len(req.Edits) > maxFileEditOperations {
+		return nil, fmt.Sprintf("too many edits: %d (max %d)", len(req.Edits), maxFileEditOperations)
+	}
+	for i, op := range req.Edits {
+		if op.OldString == "" {
+			return nil, fmt.Sprintf("edits[%d]: old_string is required", i)
+		}
+	}
+	return req.Edits, ""
+}
+
+// applyFileEditOperations applies edits in order to content. Each edit sees the
+// result of the previous ones. Any failure aborts the batch, so callers write
+// nothing. batched only changes error wording so single-edit messages stay
+// byte-identical to older servers.
+func applyFileEditOperations(content string, operations []FileEditOperation, batched bool) (string, int, string) {
+	total := 0
+	for i, op := range operations {
+		prefix := ""
+		if batched {
+			prefix = fmt.Sprintf("edits[%d]: ", i)
+		}
+		matches := fileEditMatchRanges(content, op.OldString)
+		count := len(matches)
+		if count == 0 {
+			if batched && i > 0 {
+				return "", 0, prefix + "old_string not found in file after applying earlier edits; no changes written"
+			}
+			if batched {
+				return "", 0, prefix + "old_string not found in file; no changes written"
+			}
+			return "", 0, "old_string not found in file"
+		}
+		if count > 1 && !op.ReplaceAll {
+			suffix := ""
+			if batched {
+				suffix = "; no changes written"
+			}
+			return "", 0, fmt.Sprintf(
+				"%sfound %d matches of old_string; set replace_all=true or provide a unique match%s",
+				prefix, count, suffix,
+			)
+		}
+		if !op.ReplaceAll {
+			matches = matches[:1]
+		}
+		content = replaceFileEditMatches(content, matches, op.NewString)
+		total += len(matches)
+		if len(content) > maxEditableFileSize {
+			return "", 0, "edited file exceeds 16MB limit"
+		}
+	}
+	return content, total, ""
+}
+
 // FileEditHandler performs a bounded server-side compare-and-swap edit. The entire file is read
 // and replaced on the target host, so MCP never rewrites a truncated /file/read response.
 type FileEditHandler struct {
@@ -561,8 +690,9 @@ func (h *FileEditHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSONResponse(w, map[string]string{"error": "path is required"}, aesKey)
 		return
 	}
-	if req.OldString == "" {
-		writeJSONResponse(w, map[string]string{"error": "old_string is required"}, aesKey)
+	operations, opErr := fileEditOperations(req)
+	if opErr != "" {
+		writeJSONResponse(w, map[string]string{"error": opErr}, aesKey)
 		return
 	}
 
@@ -616,31 +746,9 @@ func (h *FileEditHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content := string(data)
-	matches := fileEditMatchRanges(content, req.OldString)
-	count := len(matches)
-	if count == 0 {
-		writeJSONResponse(w, map[string]string{"error": "old_string not found in file"}, aesKey)
-		return
-	}
-	if count > 1 && !req.ReplaceAll {
-		writeJSONResponse(w, map[string]string{
-			"error": fmt.Sprintf(
-				"found %d matches of old_string; set replace_all=true or provide a unique match",
-				count,
-			),
-		}, aesKey)
-		return
-	}
-	replacementCount := count
-	selectedMatches := matches
-	if !req.ReplaceAll {
-		replacementCount = 1
-		selectedMatches = matches[:1]
-	}
-	replaced := replaceFileEditMatches(content, selectedMatches, req.NewString)
-	if len(replaced) > maxEditableFileSize {
-		writeJSONResponse(w, map[string]string{"error": "edited file exceeds 16MB limit"}, aesKey)
+	replaced, replacementCount, applyErr := applyFileEditOperations(string(data), operations, len(req.Edits) > 0)
+	if applyErr != "" {
+		writeJSONResponse(w, map[string]string{"error": applyErr}, aesKey)
 		return
 	}
 
@@ -653,6 +761,7 @@ func (h *FileEditHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		OK:           true,
 		Replacements: replacementCount,
 		SHA256:       hash,
+		Edits:        len(operations),
 	}, aesKey)
 }
 
@@ -701,9 +810,11 @@ func (h *FileGlobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	truncated := len(matches) >= 1000
-	if len(matches) > 1000 {
-		matches = matches[:1000]
+	// globWithDepth collects one extra match so an exact-limit result is not
+	// reported as truncated.
+	truncated := len(matches) > fileSearchMaxGlobMatches
+	if truncated {
+		matches = matches[:fileSearchMaxGlobMatches]
 	}
 	if matches == nil {
 		matches = []string{}
@@ -736,6 +847,9 @@ func globWithDepth(ctx context.Context, root, pattern string, maxDepth int) ([]s
 		}
 		level := strings.Count(filepath.Clean(path), string(os.PathSeparator)) - rootSeps
 		if info.IsDir() {
+			if fileSearchSkippedDirs[info.Name()] {
+				return filepath.SkipDir
+			}
 			if maxDepth > 0 && level >= maxDepth {
 				return filepath.SkipDir
 			}
@@ -750,7 +864,7 @@ func globWithDepth(ctx context.Context, root, pattern string, maxDepth int) ([]s
 		}
 		if ok, _ := doublestar.Match(matchPattern, filepath.ToSlash(rel)); ok {
 			matches = append(matches, path)
-			if len(matches) >= 1000 {
+			if len(matches) > fileSearchMaxGlobMatches {
 				return filepath.SkipAll
 			}
 		}
@@ -791,45 +905,79 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Path, _ = os.UserHomeDir()
 	}
 
-	re, err := regexp.Compile(req.Pattern)
+	pattern := req.Pattern
+	if req.CaseInsensitive {
+		pattern = "(?i)" + pattern
+	}
+	re, err := regexp.Compile(pattern)
 	if err != nil {
 		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("regex compile: %v", err)}, aesKey)
 		return
 	}
+	contextLines := min(max(req.Context, 0), grepMaxContextLines)
 
-	matches := make([]GrepMatch, 0)
-
+	root := filepath.Clean(req.Path)
 	var globFunc func(string) bool
 	if req.Glob != "" {
-		globFunc = func(name string) bool {
-			ok, _ := filepath.Match(req.Glob, filepath.Base(name))
+		// Same semantics as /file/glob: a separator-less glob matches basenames
+		// at any depth, otherwise the path relative to root ('**' supported).
+		globPattern := req.Glob
+		if !strings.Contains(globPattern, "/") {
+			globPattern = "**/" + globPattern
+		}
+		if !doublestar.ValidatePattern(globPattern) {
+			writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("invalid glob: %s", req.Glob)}, aesKey)
+			return
+		}
+		globFunc = func(path string) bool {
+			rel := filepath.Base(path)
+			if path != root {
+				if r, relErr := filepath.Rel(root, path); relErr == nil {
+					rel = r
+				}
+			}
+			ok, _ := doublestar.Match(globPattern, filepath.ToSlash(rel))
 			return ok
 		}
 	}
 
+	// Collect one match past the cap so an exact-limit result is not reported
+	// as truncated.
+	limit := grepMaxMatches + 1
+	matches := make([]GrepMatch, 0)
+	skippedLarge := 0
+
 	searchCtx, cancel := context.WithTimeout(r.Context(), maxFileSearchDuration)
 	defer cancel()
-	err = filepath.Walk(req.Path, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if ctxErr := searchCtx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if err != nil || info.IsDir() {
+		if err != nil {
 			return nil
 		}
-		if len(matches) >= 500 {
-			return filepath.SkipAll
+		if info.IsDir() {
+			if path != root && fileSearchSkippedDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
 		}
 		if globFunc != nil && !globFunc(path) {
 			return nil
 		}
-		// Skip oversized files so a single huge file can't exhaust memory.
+		// Skip oversized files so a single huge file can't exhaust memory, but
+		// count them so an empty result is never silently ambiguous.
 		if info.Size() > grepMaxFileSize {
+			skippedLarge++
 			return nil
 		}
-		if err := grepFile(searchCtx, path, re, &matches); err != nil {
+		if err := grepFile(searchCtx, path, re, contextLines, limit, &matches); err != nil {
 			return err
 		}
-		if len(matches) >= 500 {
+		if len(matches) >= limit {
 			return filepath.SkipAll
 		}
 		return nil
@@ -840,45 +988,81 @@ func (h *FileGrepHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	truncated := len(matches) > grepMaxMatches
+	if truncated {
+		matches = matches[:grepMaxMatches]
+	}
 	writeJSONResponse(w, FileGrepResponse{
-		Matches:   matches,
-		Truncated: len(matches) >= 500,
+		Matches:           matches,
+		Truncated:         truncated,
+		SkippedLargeFiles: skippedLarge,
+		ContextSupported:  true,
 	}, aesKey)
 }
 
-// grepFile streams a single file line-by-line, appending matches (up to the
-// global 500 cap) to matches. Binary files — detected by a NUL byte in the head,
-// the same heuristic grep uses — are skipped so they don't emit garbage matches.
-func grepFile(ctx context.Context, path string, re *regexp.Regexp, matches *[]GrepMatch) error {
-	f, err := os.Open(path)
-	if err != nil {
+// grepFile searches one file (already bounded by grepMaxFileSize) and appends
+// matches until matches reaches limit. The whole file is read at once, so line
+// length never aborts the search. Binary files, detected by a NUL byte in the
+// first 512 bytes as grep does, are skipped so they don't emit garbage matches.
+func grepFile(ctx context.Context, path string, re *regexp.Regexp, contextLines, limit int, matches *[]GrepMatch) error {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
 		return nil
 	}
-	defer f.Close()
-
-	br := bufio.NewReader(f)
-	if head, _ := br.Peek(512); bytes.IndexByte(head, 0) >= 0 {
-		return nil // binary file
+	if bytes.IndexByte(data[:min(len(data), 512)], 0) >= 0 {
+		return nil
 	}
 
-	scanner := bufio.NewScanner(br)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	lineNo := 0
-	for scanner.Scan() {
-		if err := ctx.Err(); err != nil {
-			return err
+	lines := strings.Split(string(data), "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1] // trailing newline does not start a line
+	}
+	for i := range lines {
+		lines[i] = strings.TrimSuffix(lines[i], "\r")
+	}
+
+	for i, line := range lines {
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
-		lineNo++
-		line := scanner.Text()
-		if re.MatchString(line) {
-			if len(line) > grepMaxContentLen {
-				line = line[:grepMaxContentLen]
-			}
-			*matches = append(*matches, GrepMatch{Path: path, Line: lineNo, Content: line})
-			if len(*matches) >= 500 {
-				return nil
-			}
+		if !re.MatchString(line) {
+			continue
+		}
+		m := GrepMatch{Path: path, Line: i + 1, Content: truncateGrepLine(line)}
+		if contextLines > 0 {
+			m.Before = truncateGrepLines(lines[max(0, i-contextLines):i])
+			m.After = truncateGrepLines(lines[i+1 : min(len(lines), i+1+contextLines)])
+		}
+		*matches = append(*matches, m)
+		if len(*matches) >= limit {
+			return nil
 		}
 	}
-	return scanner.Err()
+	return nil
+}
+
+// truncateGrepLine caps a returned line at grepMaxContentLen bytes without
+// splitting a multi-byte UTF-8 sequence.
+func truncateGrepLine(line string) string {
+	if len(line) <= grepMaxContentLen {
+		return line
+	}
+	cut := grepMaxContentLen
+	for cut > 0 && !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return line[:cut]
+}
+
+func truncateGrepLines(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = truncateGrepLine(line)
+	}
+	return out
 }
