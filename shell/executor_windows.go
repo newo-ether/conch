@@ -42,8 +42,10 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 	// stderr handle is a pipe, PowerShell 5.1 serializes error/warning records as CLIXML XML with
 	// _xHHHH_ escapes; rendering each record with Out-String and writing it through [Console] keeps
 	// stderr human-readable. Native-command stderr lines surface as ErrorRecords under 2>&1 and are
-	// rendered the same way. A terminating error is caught so its text stays plain and the process
-	// exits 1, matching the exit code of an uncaught throw.
+	// rendered as just the original line, without the ErrorRecord position/category banner. A
+	// terminating error is caught so its text stays plain and the process exits 1, matching the exit
+	// code of an uncaught throw. Records written straight to the host (Out-Host, nested powershell)
+	// bypass this pipeline; renderShellOutputLine decodes the CLIXML they produce.
 	const bootstrap = "$ProgressPreference = 'SilentlyContinue'\n" +
 		"[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)\n" +
 		"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n" +
@@ -65,6 +67,8 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 		"        [Console]::Out.Write(($fmtBuf | Out-String))\n" +
 		"        $fmtBuf.Clear()\n" +
 		"      }\n" +
+		"    } elseif ($_ -is [System.Management.Automation.ErrorRecord] -and \"$($_.FullyQualifiedErrorId)\" -like 'NativeCommandError*') {\n" +
+		"      [Console]::Error.WriteLine([string]$_.Exception.Message)\n" +
 		"    } elseif ($_ -is [System.Management.Automation.ErrorRecord] -or $_ -is [System.Management.Automation.WarningRecord] -or $_ -is [System.Management.Automation.VerboseRecord] -or $_ -is [System.Management.Automation.DebugRecord]) {\n" +
 		"      [Console]::Error.Write(($_ | Out-String))\n" +
 		"    } else {\n" +
@@ -96,6 +100,12 @@ func encodePowerShellCommand(command string) string {
 		binary.LittleEndian.PutUint16(bytes[i*2:], unit)
 	}
 	return base64.StdEncoding.EncodeToString(bytes)
+}
+
+// renderShellOutputLine decodes one output line and turns PowerShell CLIXML into plain text;
+// false drops a line with nothing to show.
+func renderShellOutputLine(line []byte) (string, bool) {
+	return renderCLIXMLLine(decodeShellOutputLine(line))
 }
 
 func decodeShellOutputLine(line []byte) string {

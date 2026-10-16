@@ -16,6 +16,7 @@ var Capabilities = []string{
 	"encrypted_sse_v1",
 	"expected_sha256",
 	"file_edit_batch",
+	"file_edit_snippets",
 	"file_grep_context",
 	"file_read_bytes_read",
 	"job_ack",

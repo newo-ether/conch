@@ -856,7 +856,28 @@ func (s *Server) doFileMultiEdit(ctx context.Context, t *Transport, args map[str
 		len(edits),
 		result.Replacements,
 		result.SHA256,
-	)), nil
+	) + formatEditSnippets(result)), nil
+}
+
+// formatEditSnippets renders edit snippets with the same `%6d\t` gutter as
+// file_read line mode; empty when the server sent none.
+func formatEditSnippets(result *FileMutationResult) string {
+	if len(result.Snippets) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, snippet := range result.Snippets {
+		if i > 0 {
+			b.WriteString("\n   ...")
+		}
+		for j, line := range snippet.Lines {
+			fmt.Fprintf(&b, "\n%6d\t%s", snippet.StartLine+j, line)
+		}
+	}
+	if result.SnippetsTruncated {
+		b.WriteString("\n[more changes not shown]")
+	}
+	return b.String()
 }
 
 // doFileEdit performs exactly one replacement. Batches belong to file_multi_edit.
@@ -886,9 +907,9 @@ func (s *Server) doFileEdit(ctx context.Context, t *Transport, args map[string]i
 			"Replaced %d occurrences (sha256 %s)",
 			result.Replacements,
 			result.SHA256,
-		)), nil
+		) + formatEditSnippets(result)), nil
 	}
-	return textResult(fmt.Sprintf("replaced 1 occurrence (sha256 %s)", result.SHA256)), nil
+	return textResult(fmt.Sprintf("replaced 1 occurrence (sha256 %s)", result.SHA256) + formatEditSnippets(result)), nil
 }
 
 // --- file_glob ---

@@ -230,6 +230,12 @@ func scanStream(wg *sync.WaitGroup, ch chan<- LineEvent, r io.Reader, stream str
 		reader := bufio.NewReaderSize(r, 64*1024)
 		line := make([]byte, 0, 64*1024)
 		discarding := false
+		banners := &nativeErrorBannerFilter{}
+		forward := func(lines []string) {
+			for _, text := range lines {
+				ch <- LineEvent{Line: text, Stream: stream}
+			}
+		}
 
 		for {
 			fragment, continued, err := reader.ReadLine()
@@ -242,17 +248,19 @@ func scanStream(wg *sync.WaitGroup, ch chan<- LineEvent, r io.Reader, stream str
 			}
 			if !continued && (err == nil || len(fragment) > 0 || len(line) > 0 || discarding) {
 				if discarding {
+					forward(banners.flush())
 					ch <- LineEvent{
 						Warning: "output truncated: a single " + stream +
 							" line exceeded the 1MB limit (redirect verbose output to a file)",
 					}
-				} else {
-					ch <- LineEvent{Line: decodeShellOutputLine(line), Stream: stream}
+				} else if text, keep := renderShellOutputLine(line); keep {
+					forward(banners.push(text))
 				}
 				line = line[:0]
 				discarding = false
 			}
 			if err != nil {
+				forward(banners.flush())
 				// Closing Conch's owned read handle is expected after a detached descendant keeps an
 				// inherited writer open beyond the bounded drain window.
 				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {

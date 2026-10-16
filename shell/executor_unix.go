@@ -13,6 +13,10 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 	return exec.CommandContext(ctx, "/bin/sh", "-c", command)
 }
 
+func renderShellOutputLine(line []byte) (string, bool) {
+	return decodeShellOutputLine(line), true
+}
+
 func decodeShellOutputLine(line []byte) string {
 	return strings.ToValidUTF8(string(line), "\uFFFD")
 }

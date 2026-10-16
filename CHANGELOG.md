@@ -5,6 +5,27 @@ All notable changes to Conch are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [1.0.22] - 2026-10-17
+### Added
+- `/file/edit` responses carry `snippets`: numbered excerpts of the edited
+  regions in the final file, with 3 lines of context, adjacent regions merged,
+  positions tracked across later edits in the same batch. At most 10 snippets and
+  60 lines in total; `snippetsTruncated` reports the cut. MCP `file_edit` and
+  `file_multi_edit` append the excerpts to their text result.
+- Capability `file_edit_snippets`.
+### Fixed
+- Windows shell output no longer leaks PowerShell CLIXML (`#< CLIXML` blocks,
+  `_x000D__x000A_` escapes, progress records). Error/warning text is decoded to
+  plain lines.
+- Native command stderr on Windows is shown as the original lines instead of the
+  `NativeCommandError` ErrorRecord view (`At line:`, `+ ...`, `CategoryInfo`,
+  `FullyQualifiedErrorId`), both in the bootstrap pipeline and when relayed by
+  `Out-Host` or a nested `powershell.exe`. In the relayed plain-text case the
+  first `cmd : message` line is kept as printed. Other ErrorRecords keep their
+  full view.
+### Compatibility
+- Additive response fields and capability only; clients and servers can upgrade
+  in any order. Clients must tolerate `snippets` being absent from older servers.
 ## [1.0.21] - 2026-10-17
 ### Added
 - MCP tool `file_multi_edit` for atomic batched replacements; `edits` is required

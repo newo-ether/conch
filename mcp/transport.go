@@ -485,6 +485,16 @@ type FileMutationResult struct {
 	Replacements int    `json:"replacements,omitempty"`
 	SHA256       string `json:"sha256"`
 	Error        string `json:"error,omitempty"`
+	// Snippets are numbered excerpts around edited regions; servers before
+	// v1.0.22 omit them.
+	Snippets          []FileEditSnippet `json:"snippets,omitempty"`
+	SnippetsTruncated bool              `json:"snippets_truncated,omitempty"`
+}
+
+// FileEditSnippet mirrors handler.FileEditSnippet.
+type FileEditSnippet struct {
+	StartLine int      `json:"start_line"`
+	Lines     []string `json:"lines"`
 }
 
 // GrepMatchResult is one match from POST /file/grep.

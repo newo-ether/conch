@@ -108,6 +108,10 @@ type FileEditResponse struct {
 	// Edits is the number of edit operations applied; older servers omit it,
 	// which lets clients detect batched-edit support from a response.
 	Edits int `json:"edits"`
+	// Snippets shows the edited file around each changed region with a few lines
+	// of context. Older servers omit it; clients must treat it as optional.
+	Snippets          []FileEditSnippet `json:"snippets,omitempty"`
+	SnippetsTruncated bool              `json:"snippets_truncated,omitempty"`
 }
 
 // FileGlobRequest is the decrypted body for POST /file/glob.
@@ -518,15 +522,17 @@ func fileEditMatchRanges(content string, oldString string) [][2]int {
 	return matches
 }
 
-func replaceFileEditMatches(content string, matches [][2]int, newString string) string {
+// replaceFileEditMatches also returns where each replacement landed in the new content.
+func replaceFileEditMatches(content string, matches [][2]int, newString string) (string, [][2]int) {
 	if len(matches) == 0 {
-		return content
+		return content, nil
 	}
 
 	fileLineEnding := preferredFileEditLineEnding(content)
 	var replaced strings.Builder
 	replaced.Grow(len(content))
 	sourceIndex := 0
+	inserted := make([][2]int, 0, len(matches))
 	for _, match := range matches {
 		replaced.WriteString(content[sourceIndex:match[0]])
 		lineEnding := preferredFileEditLineEnding(content[match[0]:match[1]])
@@ -539,11 +545,13 @@ func replaceFileEditMatches(content string, matches [][2]int, newString string) 
 		if lineEnding == "" {
 			lineEnding = "\n"
 		}
+		start := replaced.Len()
 		replaced.WriteString(withFileEditLineEnding(newString, lineEnding))
+		inserted = append(inserted, [2]int{start, replaced.Len()})
 		sourceIndex = match[1]
 	}
 	replaced.WriteString(content[sourceIndex:])
-	return replaced.String()
+	return replaced.String(), inserted
 }
 
 func preferredFileEditLineEnding(text string) string {
@@ -620,6 +628,14 @@ func fileEditOperations(req FileEditRequest) ([]FileEditOperation, string) {
 // nothing. batched only changes error wording so single-edit messages stay
 // byte-identical to older servers.
 func applyFileEditOperations(content string, operations []FileEditOperation, batched bool) (string, int, string) {
+	content, total, _, errText := applyFileEditOperationsTracked(content, operations, batched)
+	return content, total, errText
+}
+
+// applyFileEditOperationsTracked is applyFileEditOperations that also follows the
+// changed regions so the response can show them.
+func applyFileEditOperationsTracked(content string, operations []FileEditOperation, batched bool) (string, int, *fileEditTracker, string) {
+	tracker := &fileEditTracker{}
 	total := 0
 	for i, op := range operations {
 		prefix := ""
@@ -630,19 +646,19 @@ func applyFileEditOperations(content string, operations []FileEditOperation, bat
 		count := len(matches)
 		if count == 0 {
 			if batched && i > 0 {
-				return "", 0, prefix + "old_string not found in file after applying earlier edits; no changes written"
+				return "", 0, nil, prefix + "old_string not found in file after applying earlier edits; no changes written"
 			}
 			if batched {
-				return "", 0, prefix + "old_string not found in file; no changes written"
+				return "", 0, nil, prefix + "old_string not found in file; no changes written"
 			}
-			return "", 0, "old_string not found in file"
+			return "", 0, nil, "old_string not found in file"
 		}
 		if count > 1 && !op.ReplaceAll {
 			suffix := ""
 			if batched {
 				suffix = "; no changes written"
 			}
-			return "", 0, fmt.Sprintf(
+			return "", 0, nil, fmt.Sprintf(
 				"%sfound %d matches of old_string; set replace_all=true or provide a unique match%s",
 				prefix, count, suffix,
 			)
@@ -650,13 +666,15 @@ func applyFileEditOperations(content string, operations []FileEditOperation, bat
 		if !op.ReplaceAll {
 			matches = matches[:1]
 		}
-		content = replaceFileEditMatches(content, matches, op.NewString)
+		var inserted [][2]int
+		content, inserted = replaceFileEditMatches(content, matches, op.NewString)
+		tracker.apply(matches, inserted)
 		total += len(matches)
 		if len(content) > maxEditableFileSize {
-			return "", 0, "edited file exceeds 16MB limit"
+			return "", 0, nil, "edited file exceeds 16MB limit"
 		}
 	}
-	return content, total, ""
+	return content, total, tracker, ""
 }
 
 // FileEditHandler performs a bounded server-side compare-and-swap edit. The entire file is read
@@ -743,7 +761,7 @@ func (h *FileEditHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	replaced, replacementCount, applyErr := applyFileEditOperations(string(data), operations, len(req.Edits) > 0)
+	replaced, replacementCount, tracker, applyErr := applyFileEditOperationsTracked(string(data), operations, len(req.Edits) > 0)
 	if applyErr != "" {
 		writeJSONResponse(w, map[string]string{"error": applyErr}, aesKey)
 		return
@@ -754,11 +772,14 @@ func (h *FileEditHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSONResponse(w, map[string]string{"error": fmt.Sprintf("edit: %v", err)}, aesKey)
 		return
 	}
+	snippets, snippetsTruncated := tracker.snippets(replaced)
 	writeJSONResponse(w, FileEditResponse{
-		OK:           true,
-		Replacements: replacementCount,
-		SHA256:       hash,
-		Edits:        len(operations),
+		OK:                true,
+		Replacements:      replacementCount,
+		SHA256:            hash,
+		Edits:             len(operations),
+		Snippets:          snippets,
+		SnippetsTruncated: snippetsTruncated,
 	}, aesKey)
 }
 

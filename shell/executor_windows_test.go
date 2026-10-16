@@ -207,6 +207,27 @@ func executeWindowsTestCommand(t *testing.T, command string) windowsTestResult {
 	return result
 }
 
+func TestExecutorRendersNativeStderrAsOriginalLines(t *testing.T) {
+	for name, command := range map[string]string{
+		"pipeline": `cmd /c "echo first 1>&2 & echo second 1>&2" 2>&1 | Select-Object -Last 5`,
+		"out-host": `cmd /c "echo first 1>&2 & echo second 1>&2" 2>&1 | Out-Host`,
+		"nested": "& powershell -NoProfile -NonInteractive -EncodedCommand " +
+			encodePowerShellCommand(`cmd /c "echo first 1>&2 & echo second 1>&2" 2>&1 | Out-Host`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := executeWindowsTestCommand(t, command)
+			for _, noise := range []string{"#< CLIXML", "_x000D_", "CategoryInfo", "FullyQualifiedErrorId", "At line:"} {
+				if strings.Contains(result.output, noise) {
+					t.Fatalf("output contains %q: %q", noise, result.output)
+				}
+			}
+			if !strings.Contains(result.output, "first") || !strings.Contains(result.output, "second") {
+				t.Fatalf("stderr lines missing: %q", result.output)
+			}
+		})
+	}
+}
+
 func TestExecutorRendersPowerShellErrorsAsPlainText(t *testing.T) {
 	result := executeWindowsTestCommand(t, "Write-Error '中文错误消息'")
 	if strings.Contains(result.output, "#< CLIXML") {
