@@ -55,12 +55,12 @@ func TestFileMultiEditAppliesBatchAndRequiresEdits(t *testing.T) {
 		t.Fatalf("missing edits result = %+v", missing)
 	}
 
-	// Empty single-edit placeholders next to edits must not conflict.
+	// Top-level single-edit fields are not part of file_multi_edit and are ignored.
 	result, _ := server.doFileMultiEdit(context.Background(), transport, map[string]interface{}{
 		"path":        path,
-		"old_string":  "",
-		"new_string":  "",
-		"replace_all": false,
+		"old_string":  "c",
+		"new_string":  "zzz",
+		"replace_all": true,
 		"edits": []interface{}{
 			map[string]interface{}{"old_string": "a", "new_string": "1"},
 			map[string]interface{}{"old_string": "1 b", "new_string": "x"},
@@ -75,10 +75,10 @@ func TestFileMultiEditAppliesBatchAndRequiresEdits(t *testing.T) {
 	}
 }
 
-func TestFileEditStillAcceptsLegacyEdits(t *testing.T) {
+func TestFileEditRejectsEdits(t *testing.T) {
 	transport := newFileToolsTestTransport(t)
 	server := NewServer(map[string]*Transport{"test": transport}, nil)
-	path := filepath.Join(t.TempDir(), "legacy.txt")
+	path := filepath.Join(t.TempDir(), "single.txt")
 	if err := os.WriteFile(path, []byte("a b\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -86,11 +86,11 @@ func TestFileEditStillAcceptsLegacyEdits(t *testing.T) {
 		"path":  path,
 		"edits": []interface{}{map[string]interface{}{"old_string": "b", "new_string": "2"}},
 	})
-	if result.IsError {
-		t.Fatalf("legacy batch failed: %+v", result)
+	if !result.IsError || !strings.Contains(result.Content[0].Text, "use file_multi_edit") {
+		t.Fatalf("file_edit with edits result = %+v", result)
 	}
 	got, _ := os.ReadFile(path)
-	if string(got) != "a 2\n" {
-		t.Fatalf("content = %q", got)
+	if string(got) != "a b\n" {
+		t.Fatalf("content changed: %q", got)
 	}
 }

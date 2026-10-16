@@ -10,15 +10,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - MCP tool `file_multi_edit` for atomic batched replacements; `edits` is required
   and each item takes `old_string`, `new_string` and optional `replace_all`.
 ### Changed
-- MCP `file_edit` advertises only the single-edit form again, with `old_string`
-  and `new_string` required. It still accepts `edits` from older clients, and
-  empty or false single-edit placeholders next to `edits` are not a conflict.
-  The HTTP `/file/edit` endpoint is unchanged.
+- MCP `file_edit` is single-edit only again, with `old_string` and `new_string`
+  required; a call carrying `edits` is rejected with a pointer to
+  `file_multi_edit`. `file_multi_edit` reads only `edits` and ignores top-level
+  single-edit fields. The HTTP `/file/edit` endpoint is unchanged.
 ### Fixed
 - `file_read` `lines` and `totalLines` no longer count a phantom empty line after
   a trailing newline (`"a\nb\n"` is 2 lines, not 3).
 ### Compatibility
 - No protocol or capability change; clients and servers can upgrade in any order.
+  MCP callers that batched through `file_edit` must switch to `file_multi_edit`.
   Clients relying on the old `totalLines` value see one fewer line for files that
   end with a newline.
 ## [1.0.20] - 2026-10-16

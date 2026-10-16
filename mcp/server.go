@@ -831,18 +831,35 @@ func (s *Server) doFileWrite(ctx context.Context, t *Transport, args map[string]
 
 // --- file_edit / file_multi_edit ---
 
-// doFileMultiEdit requires the edits array. Single-edit fields are rejected only
-// when they carry a value, so empty placeholders from clients are tolerated.
+// doFileMultiEdit reads only the edits array. Top-level single-edit fields are
+// not part of its schema and are ignored.
 func (s *Server) doFileMultiEdit(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
-	if rawEdits, present := args["edits"]; !present || rawEdits == nil {
+	path, _ := args["path"].(string)
+	expectedSHA256, _ := args["expected_sha256"].(string)
+	if path == "" {
+		return errorResult("path is required"), nil
+	}
+	rawEdits, present := args["edits"]
+	if !present || rawEdits == nil {
 		return errorResult("edits is required"), nil
 	}
-	return s.doFileEdit(ctx, t, args)
+	edits, parseErr := parseFileEditOperations(rawEdits)
+	if parseErr != "" {
+		return errorResult(parseErr), nil
+	}
+	result, err := t.FileEditBatch(ctx, path, edits, expectedSHA256)
+	if err != nil {
+		return errorResult(fmt.Sprintf("file_multi_edit error: %v", err)), nil
+	}
+	return textResult(fmt.Sprintf(
+		"applied %d edits, %d replacements (sha256 %s)",
+		len(edits),
+		result.Replacements,
+		result.SHA256,
+	)), nil
 }
 
-// doFileEdit still accepts edits so older clients that batch through file_edit
-// keep working.
-
+// doFileEdit performs exactly one replacement. Batches belong to file_multi_edit.
 func (s *Server) doFileEdit(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
 	path, _ := args["path"].(string)
 	oldStr, _ := args["old_string"].(string)
@@ -854,23 +871,7 @@ func (s *Server) doFileEdit(ctx context.Context, t *Transport, args map[string]i
 		return errorResult("path is required"), nil
 	}
 	if rawEdits, present := args["edits"]; present && rawEdits != nil {
-		edits, parseErr := parseFileEditOperations(rawEdits)
-		if parseErr != "" {
-			return errorResult(parseErr), nil
-		}
-		if oldStr != "" || newStr != "" || replaceAll {
-			return errorResult("edits cannot be combined with old_string, new_string or replace_all"), nil
-		}
-		result, err := t.FileEditBatch(ctx, path, edits, expectedSHA256)
-		if err != nil {
-			return errorResult(fmt.Sprintf("file_edit error: %v", err)), nil
-		}
-		return textResult(fmt.Sprintf(
-			"applied %d edits, %d replacements (sha256 %s)",
-			len(edits),
-			result.Replacements,
-			result.SHA256,
-		)), nil
+		return errorResult("file_edit takes a single replacement; use file_multi_edit for edits"), nil
 	}
 	if oldStr == "" {
 		return errorResult("old_string is required"), nil
