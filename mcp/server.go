@@ -148,19 +148,32 @@ var allTools = []Tool{
 	},
 	{
 		Name:        "file_edit",
-		Description: "Edit a file on a remote device by replacing old_string with new_string. The old_string must match exactly once in the file (or set replace_all to replace all occurrences). For several changes to one file, pass edits instead: they apply in order and nothing is written unless every edit succeeds.",
+		Description: "Edit a file on a remote device by replacing old_string with new_string. The old_string must match exactly once in the file (or set replace_all to replace all occurrences). For several changes to one file, use file_multi_edit.",
 		InputSchema: JSONSchema{
 			Type: "object",
 			Properties: map[string]JSONProp{
 				"device":          {Type: "string", Description: "The target device name"},
 				"path":            {Type: "string", Description: "Absolute path to the file"},
-				"old_string":      {Type: "string", Description: "The exact text to find and replace (required unless edits is given)"},
-				"new_string":      {Type: "string", Description: "The replacement text (required unless edits is given)"},
+				"old_string":      {Type: "string", Description: "The exact text to find and replace"},
+				"new_string":      {Type: "string", Description: "The replacement text (may be empty to delete the match)"},
 				"replace_all":     {Type: "boolean", Description: "Replace all occurrences instead of requiring a unique match (default: false)"},
+				"expected_sha256": {Type: "string", Description: "Optional SHA-256 precondition; the edit fails if the current file differs"},
+			},
+			Required: []string{"device", "path", "old_string", "new_string"},
+		},
+	},
+	{
+		Name:        "file_multi_edit",
+		Description: "Apply several replacements to one file on a remote device in a single atomic operation. Edits apply in order, each sees the result of the previous ones, and nothing is written unless every edit succeeds.",
+		InputSchema: JSONSchema{
+			Type: "object",
+			Properties: map[string]JSONProp{
+				"device":          {Type: "string", Description: "The target device name"},
+				"path":            {Type: "string", Description: "Absolute path to the file"},
 				"expected_sha256": {Type: "string", Description: "Optional SHA-256 precondition; the edit fails if the current file differs"},
 				"edits": {
 					Type:        "array",
-					Description: "Optional ordered batch of edits applied atomically; each sees the result of the previous ones. Cannot be combined with old_string/new_string/replace_all.",
+					Description: "Ordered replacements (1 to 100); each old_string must match exactly once unless its replace_all is true.",
 					Items: &JSONSchema{
 						Type: "object",
 						Properties: map[string]JSONProp{
@@ -172,7 +185,7 @@ var allTools = []Tool{
 					},
 				},
 			},
-			Required: []string{"device", "path"},
+			Required: []string{"device", "path", "edits"},
 		},
 	},
 	{
@@ -520,6 +533,12 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 			return errorResult(errText), nil
 		}
 		return s.doFileEdit(ctx, transport, p.Arguments)
+	case "file_multi_edit":
+		transport, errText := s.resolveDevice(p.Arguments)
+		if errText != "" {
+			return errorResult(errText), nil
+		}
+		return s.doFileMultiEdit(ctx, transport, p.Arguments)
 	case "file_glob":
 		transport, errText := s.resolveDevice(p.Arguments)
 		if errText != "" {
@@ -810,7 +829,19 @@ func (s *Server) doFileWrite(ctx context.Context, t *Transport, args map[string]
 	return textResult(fmt.Sprintf("file written successfully (sha256 %s)", result.SHA256)), nil
 }
 
-// --- file_edit ---
+// --- file_edit / file_multi_edit ---
+
+// doFileMultiEdit requires the edits array. Single-edit fields are rejected only
+// when they carry a value, so empty placeholders from clients are tolerated.
+func (s *Server) doFileMultiEdit(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
+	if rawEdits, present := args["edits"]; !present || rawEdits == nil {
+		return errorResult("edits is required"), nil
+	}
+	return s.doFileEdit(ctx, t, args)
+}
+
+// doFileEdit still accepts edits so older clients that batch through file_edit
+// keep working.
 
 func (s *Server) doFileEdit(ctx context.Context, t *Transport, args map[string]interface{}) (ToolCallResult, *Error) {
 	path, _ := args["path"].(string)

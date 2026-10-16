@@ -321,16 +321,7 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	content := string(contentBytes)
 
-	// Count lines in returned content
-	lines := 0
-	if len(content) > 0 {
-		lines = 1
-		for _, c := range content {
-			if c == '\n' {
-				lines++
-			}
-		}
-	}
+	lines := countLines(contentBytes)
 
 	truncated := req.Offset+int64(n) < info.Size()
 	// Report the file's true line count whenever the file is small enough for a
@@ -353,18 +344,24 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, resp, aesKey)
 }
 
-// countTotalLines counts lines with the same convention used for partial reads:
-// an empty stream has zero lines; otherwise one line plus one per '\n'.
+// countTotalLines counts the whole file with the same convention as countLines.
 func countTotalLines(r io.Reader) int {
 	data, err := io.ReadAll(r)
-	if err != nil || len(data) == 0 {
+	if err != nil {
 		return 0
 	}
-	total := 1
-	for _, b := range data {
-		if b == '\n' {
-			total++
-		}
+	return countLines(data)
+}
+
+// countLines counts one line per '\n' plus a final unterminated line, so a
+// trailing newline does not add a phantom empty line.
+func countLines(data []byte) int {
+	if len(data) == 0 {
+		return 0
+	}
+	total := bytes.Count(data, []byte{'\n'})
+	if data[len(data)-1] != '\n' {
+		total++
 	}
 	return total
 }

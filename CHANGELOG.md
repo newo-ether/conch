@@ -5,6 +5,22 @@ All notable changes to Conch are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [1.0.21] - 2026-10-17
+### Added
+- MCP tool `file_multi_edit` for atomic batched replacements; `edits` is required
+  and each item takes `old_string`, `new_string` and optional `replace_all`.
+### Changed
+- MCP `file_edit` advertises only the single-edit form again, with `old_string`
+  and `new_string` required. It still accepts `edits` from older clients, and
+  empty or false single-edit placeholders next to `edits` are not a conflict.
+  The HTTP `/file/edit` endpoint is unchanged.
+### Fixed
+- `file_read` `lines` and `totalLines` no longer count a phantom empty line after
+  a trailing newline (`"a\nb\n"` is 2 lines, not 3).
+### Compatibility
+- No protocol or capability change; clients and servers can upgrade in any order.
+  Clients relying on the old `totalLines` value see one fewer line for files that
+  end with a newline.
 ## [1.0.20] - 2026-10-16
 ### Added
 - `file_edit` accepts an `edits` array of up to 100 ordered replacements applied
@@ -215,7 +231,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added regressions for PowerShell here-strings, Unicode, parser failures, file side effects, maximum command size, retained descendant handles, durable terminal settlement, and high-volume tail output.
 - Verified Linux and Windows tests, Linux race detection, vet, Bash and PowerShell installer regressions, deterministic six-target builds, release checksums, and provenance attestation.
 
-[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.20...HEAD
+[Unreleased]: https://github.com/newo-ether/conch/compare/v1.0.21...HEAD
+[1.0.21]: https://github.com/newo-ether/conch/compare/v1.0.20...v1.0.21
 [1.0.20]: https://github.com/newo-ether/conch/compare/v1.0.19...v1.0.20
 [1.0.19]: https://github.com/newo-ether/conch/compare/v1.0.18...v1.0.19
 [1.0.18]: https://github.com/newo-ether/conch/compare/v1.0.17...v1.0.18

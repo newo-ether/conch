@@ -76,8 +76,8 @@ func TestFileReadReportsTotalLinesForTruncatedReads(t *testing.T) {
 	if !result.Truncated {
 		t.Fatalf("truncated = false, want true")
 	}
-	if result.TotalLines != 4 {
-		t.Fatalf("totalLines = %d, want 4 (whole-file convention: 1 + one per newline)", result.TotalLines)
+	if result.TotalLines != 3 {
+		t.Fatalf("totalLines = %d, want 3 (a trailing newline does not add a line)", result.TotalLines)
 	}
 	if result.Lines != 2 {
 		t.Fatalf("lines = %d, want 2 for partial content %q", result.Lines, result.Content)
