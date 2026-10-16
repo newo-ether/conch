@@ -27,6 +27,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `.hg` and `.svn`.
 - `file_glob` and `file_grep` report `truncated` only when results were actually
   dropped, not when exactly hitting the cap; `file_glob` skips VCS directories.
+- Windows user-mode installer: start the task without a console window through a
+  hidden wscript launcher that supervises the server (adopts a running instance,
+  gives up after five fast exits), stop the server as well as the task in the
+  restart hint, fail loudly when task registration is denied, repair task file
+  ownership after an elevated registration, and protect the secret file with a
+  DACL-only `icacls` rewrite so non-elevated upgrades no longer roll back.
+- Linux installer: fix the systemd environment file path.
+### Changed
+- Completed jobs are retained for 24 hours by default (was 168), in the config
+  fallback and both installers. Existing `CONCH_JOB_RETENTION_HOURS` values are kept.
+- Conch is licensed under GPL-3.0-only from this version; earlier releases keep
+  their original license. Release assets include THIRD_PARTY_NOTICES.txt.
 ### Compatibility
 - Older clients are unaffected. Newer clients detect batch edit support from the
   `edits` response field and context support from `contextSupported`, and keep
