@@ -228,6 +228,30 @@ func TestExecutorRendersNativeStderrAsOriginalLines(t *testing.T) {
 	}
 }
 
+func TestExecutorNonTerminatingErrorExitsNonZero(t *testing.T) {
+	result := executeWindowsTestCommand(t, `Get-Item 'C:\conch-missing-path-probe'; Write-Output 'AFTER'`)
+	if result.exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1: %q", result.exitCode, result.output)
+	}
+	if !strings.Contains(result.output, "AFTER") {
+		t.Fatalf("script did not continue after the non-terminating error: %q", result.output)
+	}
+}
+
+func TestExecutorNativeStderrAloneKeepsExitZero(t *testing.T) {
+	result := executeWindowsTestCommand(t, `cmd /c "echo progress 1>&2"`)
+	if result.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0: %q", result.exitCode, result.output)
+	}
+}
+
+func TestExecutorNativeExitCodeWinsOverErrorFlag(t *testing.T) {
+	result := executeWindowsTestCommand(t, `Get-Item 'C:\conch-missing-path-probe'; cmd /c exit 7`)
+	if result.exitCode != 7 {
+		t.Fatalf("exit code = %d, want 7: %q", result.exitCode, result.output)
+	}
+}
+
 func TestExecutorRendersPowerShellErrorsAsPlainText(t *testing.T) {
 	result := executeWindowsTestCommand(t, "Write-Error '中文错误消息'")
 	if strings.Contains(result.output, "#< CLIXML") {

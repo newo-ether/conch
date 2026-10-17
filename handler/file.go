@@ -3,7 +3,9 @@ package handler
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,6 +56,10 @@ type FileReadResponse struct {
 	// file continue at Offset+BytesRead; len(Content) can differ when the file holds
 	// invalid UTF-8 that JSON encoding replaces.
 	BytesRead int64 `json:"bytesRead"`
+	// SHA256 is the hash of the whole file, so a client can pass it as expected_sha256 to a
+	// later write or edit. Omitted for files larger than maxEditableFileSize; older servers
+	// omit it too.
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // FileImageRequest is the decrypted body for POST /file/image.
@@ -337,6 +343,19 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			totalLines = countTotalLines(io.LimitReader(f, maxFileSize+1))
 		}
 	}
+	// A single read that covered the whole file hashes exactly the bytes returned; otherwise the
+	// file is hashed again from the start.
+	fileHash := ""
+	if req.Offset == 0 && int64(n) == info.Size() {
+		fileHash = crypto.SHA256Hex(buf[:n])
+	} else if info.Size() <= maxEditableFileSize {
+		if _, seekErr := f.Seek(0, io.SeekStart); seekErr == nil {
+			hasher := sha256.New()
+			if _, copyErr := io.Copy(hasher, io.LimitReader(f, maxEditableFileSize+1)); copyErr == nil {
+				fileHash = hex.EncodeToString(hasher.Sum(nil))
+			}
+		}
+	}
 	resp := FileReadResponse{
 		Content:    content,
 		Lines:      lines,
@@ -344,6 +363,7 @@ func (h *FileReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Size:       info.Size(),
 		Truncated:  truncated,
 		BytesRead:  int64(leadingDropped + len(contentBytes)),
+		SHA256:     fileHash,
 	}
 	writeJSONResponse(w, resp, aesKey)
 }

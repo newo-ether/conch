@@ -5,6 +5,20 @@ All notable changes to Conch are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [1.0.23] - 2026-10-17
+### Added
+- `/file/read` responses carry `sha256`, the hash of the whole file (also for
+  partial and offset reads), so a client can pass it as `expected_sha256` to a
+  later write or edit without writing first. Omitted above the 16 MB editable
+  size; older servers omit it as well.
+- Capability `file_read_sha256`.
+### Changed
+- Windows: a run that emitted a non-terminating PowerShell error (for example
+  `Get-Item` on a missing path) now exits 1 instead of 0 when it would otherwise
+  succeed. A non-zero native `$LASTEXITCODE` still wins. Native command stderr
+  alone does not count, so tools that print progress to stderr keep exit 0.
+  Scripts that relied on exit 0 after such errors should use
+  `-ErrorAction SilentlyContinue` or handle the error.
 ## [1.0.22] - 2026-10-17
 ### Added
 - `/file/edit` responses carry `snippets`: numbered excerpts of the edited

@@ -44,8 +44,11 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 	// stderr human-readable. Native-command stderr lines surface as ErrorRecords under 2>&1 and are
 	// rendered as just the original line, without the ErrorRecord position/category banner. A
 	// terminating error is caught so its text stays plain and the process exits 1, matching the exit
-	// code of an uncaught throw. Records written straight to the host (Out-Host, nested powershell)
-	// bypass this pipeline; renderShellOutputLine decodes the CLIXML they produce.
+	// code of an uncaught throw. A non-terminating PowerShell error (Get-Item on a missing path) also
+	// makes an otherwise successful run exit 1, so callers reading only the exit code see the failure;
+	// native stderr lines do not count because many tools write progress there. Records written
+	// straight to the host (Out-Host, nested powershell) bypass this pipeline;
+	// renderShellOutputLine decodes the CLIXML they produce.
 	const bootstrap = "$ProgressPreference = 'SilentlyContinue'\n" +
 		"[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)\n" +
 		"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n" +
@@ -58,6 +61,7 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 		"  exit 1\n" +
 		"}\n" +
 		"$fmtBuf = [Collections.Generic.List[object]]::new()\n" +
+		"$global:__conchHadErrors = $false\n" +
 		"try {\n" +
 		"  & $script *>&1 | ForEach-Object {\n" +
 		"    $typeName = if ($null -ne $_) { $_.GetType().FullName } else { $null }\n" +
@@ -70,6 +74,7 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 		"    } elseif ($_ -is [System.Management.Automation.ErrorRecord] -and \"$($_.FullyQualifiedErrorId)\" -like 'NativeCommandError*') {\n" +
 		"      [Console]::Error.WriteLine([string]$_.Exception.Message)\n" +
 		"    } elseif ($_ -is [System.Management.Automation.ErrorRecord] -or $_ -is [System.Management.Automation.WarningRecord] -or $_ -is [System.Management.Automation.VerboseRecord] -or $_ -is [System.Management.Automation.DebugRecord]) {\n" +
+		"      if ($_ -is [System.Management.Automation.ErrorRecord]) { $global:__conchHadErrors = $true }\n" +
 		"      [Console]::Error.Write(($_ | Out-String))\n" +
 		"    } else {\n" +
 		"      [Console]::Out.Write(($_ | Out-String))\n" +
@@ -79,7 +84,9 @@ func newShellCommand(ctx context.Context, command string) *exec.Cmd {
 		"  [Console]::Error.Write(($_ | Out-String))\n" +
 		"  exit 1\n" +
 		"}\n" +
-		"if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\n"
+		"if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n" +
+		"if ($global:__conchHadErrors) { exit 1 }\n" +
+		"exit 0\n"
 	cmd := exec.CommandContext(
 		ctx,
 		"powershell",

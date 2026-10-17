@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/newo-ether/conch/crypto"
 )
 
 func TestFileReadTrimsPartialUTF8AtLimitBoundary(t *testing.T) {
@@ -81,5 +83,30 @@ func TestFileReadReportsTotalLinesForTruncatedReads(t *testing.T) {
 	}
 	if result.Lines != 2 {
 		t.Fatalf("lines = %d, want 2 for partial content %q", result.Lines, result.Content)
+	}
+}
+
+func TestFileReadReportsWholeFileSHA256(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hash.txt")
+	data := []byte("alpha\nbeta\ngamma\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	want := crypto.SHA256Hex(data)
+	// Whole-file read, partial read from the start and a read from an offset all report the
+	// hash of the complete file, which is what expected_sha256 compares against.
+	for _, req := range []FileReadRequest{
+		{Path: path},
+		{Path: path, Limit: 3},
+		{Path: path, Offset: 6, Limit: 4},
+	} {
+		response := callPlainFileHandler(t, &FileReadHandler{}, "/file/read", req)
+		var result FileReadResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.SHA256 != want {
+			t.Fatalf("offset=%d limit=%d sha256 = %q, want %q", req.Offset, req.Limit, result.SHA256, want)
+		}
 	}
 }
