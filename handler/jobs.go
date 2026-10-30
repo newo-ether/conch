@@ -20,6 +20,30 @@ type jobIDRequest struct {
 	JobID string `json:"job_id"`
 }
 
+const maxJobListBytes = 8 << 20
+
+func jobListPage(jobs []shell.Job, offset, limit int) map[string]any {
+	if offset > len(jobs) {
+		offset = len(jobs)
+	}
+	summaries := make([]map[string]any, 0, limit)
+	next, size := offset, 0
+	for next < len(jobs) && len(summaries) < limit {
+		summary := jobListResponse(jobs[next])
+		encoded, _ := json.Marshal(summary)
+		if size+len(encoded) > maxJobListBytes && len(summaries) > 0 {
+			break
+		}
+		summaries = append(summaries, summary)
+		size += len(encoded)
+		next++
+	}
+	return map[string]any{
+		"type": "list_shell_jobs", "jobs": summaries, "total": len(jobs),
+		"offset": offset, "next_offset": next, "has_more": next < len(jobs),
+	}
+}
+
 func (h *JobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	bodyBytes, err := io.ReadAll(r.Body)
@@ -47,15 +71,18 @@ func (h *JobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONResponse(w, jobResponse(job, true), aesKey)
 	case "list":
-		jobs := h.Jobs.List()
-		summaries := make([]map[string]any, 0, len(jobs))
-		for _, job := range jobs {
-			summaries = append(summaries, jobListResponse(job))
+		var req struct {
+			Offset int `json:"offset"`
+			Limit  int `json:"limit"`
 		}
-		writeJSONResponse(w, map[string]any{
-			"type": "list_shell_jobs",
-			"jobs": summaries,
-		}, aesKey)
+		if json.Unmarshal(plaintext, &req) != nil || req.Offset < 0 || req.Limit < 0 {
+			writeJSONResponse(w, map[string]string{"error": "offset and limit must be nonnegative integers"}, aesKey)
+			return
+		}
+		if req.Limit == 0 || req.Limit > 100 {
+			req.Limit = 100
+		}
+		writeJSONResponse(w, jobListPage(h.Jobs.List(), req.Offset, req.Limit), aesKey)
 	case "get", "stop", "ack":
 		var req jobIDRequest
 		if json.Unmarshal(plaintext, &req) != nil || req.JobID == "" {
@@ -104,6 +131,7 @@ func jobResponse(job shell.Job, background bool) map[string]any {
 		"type":         "shell_job",
 		"background":   background,
 		"job_id":       job.JobID,
+		"description":  job.Description,
 		"command":      job.Command,
 		"workdir":      job.Workdir,
 		"state":        job.State,
@@ -129,9 +157,8 @@ func jobResponse(job shell.Job, background bool) map[string]any {
 	return response
 }
 
-// List responses intentionally omit rolling output. At the configured maxima, serializing every
-// retained job body could turn one status query into a roughly 25 MiB model/tool result. The job
-// remains fully retrievable by ID through /jobs/get until the bounded retention policy evicts it.
+// List pages omit rolling output and bound encoded metadata. Full retained job bodies
+// remain retrievable by ID until time retention expires.
 func jobListResponse(job shell.Job) map[string]any {
 	response := jobResponse(
 		job,

@@ -145,11 +145,11 @@ curl -s http://localhost:14216/health
 | `CONCH_ALLOW_NO_AUTH` | `false` | Start without an API key. Encryption and signing are disabled; all requests are accepted in plaintext. |
 | `CONCH_TIMEOUT` | `30` | Default command timeout in seconds |
 | `CONCH_MAX_TIMEOUT` | `1800` | Maximum allowed timeout in seconds (30 minutes) |
-| `CONCH_JOB_DIR` | OS user config directory | Directory containing durable background-job snapshots |
-| `CONCH_JOB_RETENTION_HOURS` | `24` | Retain completed background jobs for this many hours |
+| `CONCH_JOB_DIR` | OS user config directory | Directory containing durable snapshots of all shell executions |
+| `CONCH_JOB_RETENTION_HOURS` | `24` | Retain completed foreground and background jobs for this many hours |
 | `CONCH_MAX_JOB_TIMEOUT_SECONDS` | `86400` | Maximum runtime of one background job |
 | `CONCH_MAX_JOB_OUTPUT_BYTES` | `262144` | Maximum rolling output retained per job |
-| `CONCH_MAX_JOBS` | `100` | Maximum retained job snapshots; running jobs are never evicted |
+| `CONCH_MAX_JOBS` | _(ignored)_ | Deprecated; snapshots expire only by time, never by count or acknowledgement |
 | `CONCH_TRUSTED_PROXIES` | _(empty)_ | Comma-separated proxy IPs/CIDRs allowed to supply `X-Forwarded-For`; untrusted forwarding headers are ignored |
 
 ## Platform behavior
@@ -188,7 +188,7 @@ Clients verify this signature before trusting the key.
 
 ### `POST /execute`
 
-Execute a shell command. Every request carries an HMAC signature that proves API key possession.
+Execute a shell command and retain its job snapshot under `CONCH_JOB_DIR`. Line and terminal events carry `job_id`, retrievable through `/jobs/get` until time retention expires. The terminal event is published only after its snapshot is durable. Disconnecting cancels this foreground process, then drains and retains its final state. Every request carries an HMAC signature that proves API key possession.
 
 **Headers:**
 
@@ -216,6 +216,7 @@ After decryption, the body is JSON:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `command` | string | yes | Shell command to execute |
+| `description` | string | no | Purpose of this execution, retained with the job (4 KiB UTF-8 maximum); required by current tool schemas |
 | `timeout_ms` | integer | no | Per-command timeout in milliseconds (capped at `CONCH_MAX_TIMEOUT`) |
 | `workdir` | string | no | Working directory for the command |
 
@@ -238,10 +239,12 @@ Background jobs use the same authenticated and encrypted POST envelope as `/exec
 | Endpoint | Request body | Description |
 |----------|--------------|-------------|
 | `POST /jobs/start` | `{"command":"...","timeout_ms":600000,"workdir":"/tmp"}` | Start a durable job and return its `job_id` |
-| `POST /jobs/list` | `{}` | List retained job metadata, newest first; rolling output is omitted |
+| `POST /jobs/list` | `{"offset":0,"limit":100}` | List a bounded page of retained job metadata, newest first; output is omitted. Returns `total`, `offset`, `next_offset`, and `has_more` |
 | `POST /jobs/get` | `{"job_id":"..."}` | Return current state, rolling output, exit code, and truncation metadata |
 | `POST /jobs/stop` | `{"job_id":"..."}` | Cancel the job and its process tree |
-| `POST /jobs/ack` | `{"job_id":"..."}` | Idempotently delete a terminal job after the client durably stores its result; live jobs are rejected |
+| `POST /jobs/ack` | `{"job_id":"..."}` | Idempotently confirm durable terminal settlement; the snapshot remains queryable until time expiry. Live or settling jobs are rejected |
+
+List pages default to at most 100 records and 8 MiB of encoded metadata, keeping encrypted responses within the client read bound even with escaped long commands. Use `next_offset` while `has_more` is true. Each page reflects current newest-first ordering; new jobs or expiry can shift offsets between calls. Paging never deletes stored jobs. Foreground and background jobs share retention measured from completion, bounded rolling output and the global execution concurrency limit.
 
 Job states are `running`, `stopping`, `settling`, `succeeded`, `failed`, `stopped`, and `interrupted`. `settling` means the process has ended but its terminal snapshot is still retrying durable persistence and cannot yet be acknowledged. A job that was active when Conch restarted is recovered as `interrupted`; Conch never reports an orphaned process as still running.
 
@@ -306,6 +309,8 @@ The `conch-mcp` binary exposes bounded synchronous shell execution, explicit dur
 | `command` | string | yes | — | Shell command to execute |
 | `timeout_ms` | integer | yes | — | Per-call execution timeout in milliseconds (1–1800000); the MCP request deadline is this value plus a small settlement margin, and the server enforces the 30-minute ceiling |
 | `workdir` | string | no | — | Working directory |
+
+Every `shell_*` tool requires `description` describing that call's purpose. Execute/start store it as job metadata; later list/get/stop/ack descriptions describe the current action and never replace the original job purpose. `shell_execute`, `shell_start`, and `shell_job_get` accept optional `head_lines` and `tail_lines` together. Their model-facing preview marks omitted middle lines and never duplicates overlap; retained output is unchanged. `shell_jobs` accepts `offset` and `limit` for paging.
 
 Durable execution uses `shell_start`, `shell_jobs`, `shell_job_get`, `shell_job_stop`, and `shell_job_ack`; it is never entered by silently retrying a timed-out synchronous command. File tools are `file_read`, `view_image`, `file_write`, `file_edit`, `file_multi_edit`, `file_glob`, and `file_grep`. `file_edit` and `file_multi_edit` execute atomically on the target and optionally accept `expected_sha256`.
 

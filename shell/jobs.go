@@ -28,15 +28,16 @@ const (
 )
 
 type Job struct {
-	JobID      string     `json:"job_id"`
-	Command    string     `json:"command"`
-	Workdir    string     `json:"workdir,omitempty"`
-	State      string     `json:"state"`
-	CreatedAt  time.Time  `json:"created_at"`
-	StartedAt  time.Time  `json:"started_at"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	ExitCode   *int       `json:"exit_code,omitempty"`
-	Error      string     `json:"error,omitempty"`
+	Description string     `json:"description,omitempty"`
+	JobID       string     `json:"job_id"`
+	Command     string     `json:"command"`
+	Workdir     string     `json:"workdir,omitempty"`
+	State       string     `json:"state"`
+	CreatedAt   time.Time  `json:"created_at"`
+	StartedAt   time.Time  `json:"started_at"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	ExitCode    *int       `json:"exit_code,omitempty"`
+	Error       string     `json:"error,omitempty"`
 	// Warning is a non-fatal degradation (currently output truncation). Unlike Error it never
 	// changes State, so a job can legitimately be both succeeded and truncated.
 	Warning         string `json:"warning,omitempty"`
@@ -55,7 +56,6 @@ type JobManager struct {
 	retention      time.Duration
 	maxRuntime     time.Duration
 	maxOutputBytes int
-	maxJobs        int
 	ctx            context.Context
 	cancel         context.CancelFunc
 	wg             sync.WaitGroup
@@ -68,10 +68,6 @@ type JobManager struct {
 	jobs        map[string]*Job
 	cancels     map[string]context.CancelFunc
 	lastPersist map[string]time.Time
-	// acknowledged fences every persistence attempt that could race a terminal ACK. activeRunners
-	// bounds each fence to the lifetime of the one goroutine that can still write that job.
-	acknowledged  map[string]struct{}
-	activeRunners map[string]struct{}
 
 	// persistInterceptor is test-only fault injection; production constructors leave it nil.
 	persistInterceptor func(Job) error
@@ -83,7 +79,7 @@ func NewJobManager(
 	retention time.Duration,
 	maxRuntime time.Duration,
 	maxOutputBytes int,
-	maxJobs int,
+	_ int, // Retained for source compatibility; count eviction is no longer applied.
 ) (*JobManager, error) {
 	if executor == nil {
 		return nil, errors.New("executor is required")
@@ -91,7 +87,7 @@ func NewJobManager(
 	if dir == "" {
 		return nil, errors.New("job directory is required")
 	}
-	if maxRuntime <= 0 || maxOutputBytes <= 0 || maxJobs <= 0 {
+	if maxRuntime <= 0 || maxOutputBytes <= 0 {
 		return nil, errors.New("job limits must be positive")
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -104,14 +100,11 @@ func NewJobManager(
 		retention:      retention,
 		maxRuntime:     maxRuntime,
 		maxOutputBytes: maxOutputBytes,
-		maxJobs:        maxJobs,
 		ctx:            ctx,
 		cancel:         cancel,
 		jobs:           make(map[string]*Job),
 		cancels:        make(map[string]context.CancelFunc),
 		lastPersist:    make(map[string]time.Time),
-		acknowledged:   make(map[string]struct{}),
-		activeRunners:  make(map[string]struct{}),
 	}
 	if err := manager.load(); err != nil {
 		cancel()
@@ -145,6 +138,24 @@ func (m *JobManager) Close(ctx context.Context) error {
 }
 
 func (m *JobManager) Start(req Request) (Job, error) {
+	return m.start(req, m.ctx, m.maxRuntime, nil)
+}
+
+// Execute records foreground streams in the same store as background jobs. Disconnecting
+// still cancels the process; the runner drains and persists its final state independently.
+func (m *JobManager) Execute(ctx context.Context, req Request) <-chan LineEvent {
+	events := make(chan LineEvent, 10)
+	if req.TimeoutMs <= 0 {
+		req.TimeoutMs = int(m.executor.DefaultTimeout / time.Millisecond)
+	}
+	if _, err := m.start(req, ctx, m.executor.MaxTimeout, events); err != nil {
+		events <- LineEvent{Error: err.Error()}
+		close(events)
+	}
+	return events
+}
+
+func (m *JobManager) start(req Request, parent context.Context, maxTimeout time.Duration, events chan LineEvent) (Job, error) {
 	if strings.TrimSpace(req.Command) == "" {
 		return Job{}, errors.New("command is required")
 	}
@@ -153,6 +164,9 @@ func (m *JobManager) Start(req Request) (Job, error) {
 	}
 	if len(req.Workdir) > MaxWorkdirBytes {
 		return Job{}, errors.New("workdir exceeds 32KB limit")
+	}
+	if len(req.Description) > MaxDescriptionBytes {
+		return Job{}, errors.New("description exceeds 4KB limit")
 	}
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
@@ -172,33 +186,39 @@ func (m *JobManager) Start(req Request) (Job, error) {
 	}
 	now := time.Now().UTC()
 	job := &Job{
-		JobID:     id,
-		Command:   req.Command,
-		Workdir:   req.Workdir,
-		State:     JobStateRunning,
-		CreatedAt: now,
-		StartedAt: now,
-		Output:    "",
+		Description: req.Description,
+		JobID:       id,
+		Command:     req.Command,
+		Workdir:     req.Workdir,
+		State:       JobStateRunning,
+		CreatedAt:   now,
+		StartedAt:   now,
+		Output:      "",
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
+	stopParent := context.AfterFunc(parent, cancel)
 	m.jobs[id] = job
 	m.cancels[id] = cancel
-	m.activeRunners[id] = struct{}{}
 	snapshot := *job
 	m.mu.Unlock()
 	if err := m.persist(snapshot); err != nil {
 		m.mu.Lock()
 		delete(m.jobs, id)
 		delete(m.cancels, id)
-		delete(m.activeRunners, id)
 		m.mu.Unlock()
+		stopParent()
 		cancel()
 		return Job{}, err
 	}
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		m.run(ctx, req, id)
+		defer stopParent()
+		defer cancel()
+		if events != nil {
+			defer close(events)
+		}
+		m.run(ctx, req, id, maxTimeout, events)
 	}()
 	return snapshot, nil
 }
@@ -218,6 +238,7 @@ func (m *JobManager) List() []Job {
 }
 
 func (m *JobManager) Get(id string) (Job, bool) {
+	m.cleanup()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	job, ok := m.jobs[id]
@@ -249,66 +270,39 @@ func (m *JobManager) Stop(id string) (Job, bool) {
 	return snapshot, true
 }
 
-// Acknowledge removes a terminal job only after its caller has durably retained the result. It is
-// idempotent for a missing/already-acknowledged ID and rejects live jobs. The persistence fence is
-// necessary because the runner exposes terminal state immediately before its final snapshot write;
-// without it, an ACK could delete the file and that delayed write could resurrect it on restart.
+// Acknowledge confirms that a terminal result is durably settled. Results remain queryable
+// until time retention expires, including after acknowledgement and server restart.
 func (m *JobManager) Acknowledge(id string) (bool, error) {
 	if id == "" {
 		return false, errors.New("job_id is required")
 	}
-
-	m.persistMu.Lock()
-	defer m.persistMu.Unlock()
-	m.mu.Lock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	job, ok := m.jobs[id]
 	if !ok {
-		m.mu.Unlock()
 		return true, nil
 	}
 	if job.State == JobStateRunning || job.State == JobStateStopping || !job.terminalSettled {
-		m.mu.Unlock()
 		return false, errors.New("job result is not durably settled")
 	}
-	_, runnerActive := m.activeRunners[id]
-	m.acknowledged[id] = struct{}{}
-	m.mu.Unlock()
-
-	if err := os.Remove(m.path(id)); err != nil && !os.IsNotExist(err) {
-		m.mu.Lock()
-		delete(m.acknowledged, id)
-		m.mu.Unlock()
-		return false, err
-	}
-	if err := syncDirectory(m.dir); err != nil {
-		m.mu.Lock()
-		delete(m.acknowledged, id)
-		m.mu.Unlock()
-		return false, err
-	}
-
-	m.mu.Lock()
-	delete(m.jobs, id)
-	delete(m.cancels, id)
-	delete(m.lastPersist, id)
-	if !runnerActive {
-		delete(m.acknowledged, id)
-	}
-	m.mu.Unlock()
 	return true, nil
 }
 
-func (m *JobManager) run(ctx context.Context, req Request, id string) {
-	defer func() {
-		m.mu.Lock()
-		delete(m.activeRunners, id)
-		delete(m.acknowledged, id)
-		m.mu.Unlock()
-	}()
+func (m *JobManager) run(ctx context.Context, req Request, id string, maxTimeout time.Duration, output chan LineEvent) {
+	forward := func(event LineEvent) {
+		if output != nil {
+			event.JobID = id
+			select {
+			case output <- event:
+			case <-ctx.Done():
+			}
+		}
+	}
+	var terminal *LineEvent
 	if req.TimeoutMs <= 0 {
 		req.TimeoutMs = int(m.maxRuntime / time.Millisecond)
 	}
-	events := m.executor.ExecuteWithMaxTimeout(ctx, req, m.maxRuntime)
+	events := m.executor.ExecuteWithMaxTimeout(ctx, req, maxTimeout)
 	for event := range events {
 		m.mu.Lock()
 		job := m.jobs[id]
@@ -354,6 +348,12 @@ func (m *JobManager) run(ctx context.Context, req Request, id string) {
 				log.Printf("WARNING: failed to persist running job %s: %v", id, err)
 			}
 		}
+		if event.Error != "" || event.ExitCode != nil {
+			copy := event
+			terminal = &copy
+		} else {
+			forward(event)
+		}
 	}
 
 	m.mu.Lock()
@@ -389,6 +389,9 @@ func (m *JobManager) run(ctx context.Context, req Request, id string) {
 			}
 			m.mu.Unlock()
 			m.cleanup()
+			if terminal != nil {
+				forward(*terminal)
+			}
 			return
 		}
 
@@ -491,20 +494,14 @@ func readableJobSnapshot(job *Job) Job {
 }
 
 func (m *JobManager) cleanup() {
-	// Use the same lock order as persistence and ACK so retention cannot race a snapshot write.
+	// Retention runs only after terminal persistence has completed.
 	m.persistMu.Lock()
 	defer m.persistMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	now := time.Now().UTC()
-	type candidate struct {
-		id       string
-		terminal time.Time
-	}
-	completed := make([]candidate, 0)
 	toRemove := make(map[string]struct{})
-	projectedCount := len(m.jobs)
 	for id, job := range m.jobs {
 		if job.State == JobStateRunning || job.State == JobStateStopping || !job.terminalSettled {
 			continue
@@ -515,20 +512,7 @@ func (m *JobManager) cleanup() {
 		}
 		if m.retention > 0 && now.Sub(terminalAt) > m.retention {
 			toRemove[id] = struct{}{}
-			projectedCount--
-			continue
 		}
-		completed = append(completed, candidate{id: id, terminal: terminalAt})
-	}
-	sort.Slice(completed, func(i, j int) bool {
-		return completed[i].terminal.Before(completed[j].terminal)
-	})
-	for _, item := range completed {
-		if projectedCount <= m.maxJobs {
-			break
-		}
-		toRemove[item.id] = struct{}{}
-		projectedCount--
 	}
 
 	removed := false
@@ -540,7 +524,6 @@ func (m *JobManager) cleanup() {
 		delete(m.jobs, id)
 		delete(m.cancels, id)
 		delete(m.lastPersist, id)
-		delete(m.acknowledged, id)
 		removed = true
 	}
 	if removed {
@@ -558,12 +541,6 @@ func (m *JobManager) persist(job Job) error {
 	}
 	m.persistMu.Lock()
 	defer m.persistMu.Unlock()
-	m.mu.RLock()
-	_, acknowledged := m.acknowledged[job.JobID]
-	m.mu.RUnlock()
-	if acknowledged {
-		return nil
-	}
 
 	data, err := json.MarshalIndent(job, "", "  ")
 	if err != nil {

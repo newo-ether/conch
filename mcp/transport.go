@@ -21,6 +21,7 @@ import (
 
 // LineEvent represents one line of shell output.
 type LineEvent struct {
+	JobID    string `json:"job_id,omitempty"`
 	Line     string `json:"line,omitempty"`
 	Stream   string `json:"stream,omitempty"`
 	ExitCode *int   `json:"exit_code,omitempty"`
@@ -249,6 +250,7 @@ func (t *Transport) Execute(
 	command string,
 	timeoutMs int,
 	workdir string,
+	description ...string,
 ) (events []LineEvent, err error) {
 	defer func() { t.recordOperation(err) }()
 
@@ -262,10 +264,10 @@ func (t *Transport) Execute(
 	if err = t.Initialize(executeCtx); err != nil {
 		return nil, fmt.Errorf("refresh server key: %w", err)
 	}
-	return t.executeOnce(executeCtx, command, timeoutMs, workdir)
+	return t.executeOnce(executeCtx, command, timeoutMs, workdir, description...)
 }
 
-func (t *Transport) executeOnce(ctx context.Context, command string, timeoutMs int, workdir string) ([]LineEvent, error) {
+func (t *Transport) executeOnce(ctx context.Context, command string, timeoutMs int, workdir string, description ...string) ([]LineEvent, error) {
 	if err := t.ensureInitialized(ctx); err != nil {
 		return nil, fmt.Errorf("initialize transport: %w", err)
 	}
@@ -273,9 +275,10 @@ func (t *Transport) executeOnce(ctx context.Context, command string, timeoutMs i
 
 	// Build command JSON
 	cmdJSON, err := json.Marshal(map[string]interface{}{
-		"command":    command,
-		"timeout_ms": timeoutMs,
-		"workdir":    workdir,
+		"description": firstDescription(description),
+		"command":     command,
+		"timeout_ms":  timeoutMs,
+		"workdir":     workdir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal command: %w", err)
@@ -340,6 +343,7 @@ func (t *Transport) executeOnce(ctx context.Context, command string, timeoutMs i
 }
 
 type ShellJobResult struct {
+	Description     string     `json:"description,omitempty"`
 	Type            string     `json:"type"`
 	Background      bool       `json:"background"`
 	JobID           string     `json:"job_id"`
@@ -359,9 +363,13 @@ type ShellJobResult struct {
 }
 
 type ShellJobListResult struct {
-	Type  string           `json:"type"`
-	Jobs  []ShellJobResult `json:"jobs"`
-	Error string           `json:"error,omitempty"`
+	Type       string           `json:"type"`
+	Jobs       []ShellJobResult `json:"jobs"`
+	Total      int              `json:"total"`
+	Offset     int              `json:"offset"`
+	NextOffset int              `json:"next_offset"`
+	HasMore    bool             `json:"has_more"`
+	Error      string           `json:"error,omitempty"`
 }
 
 type ShellJobAckResult struct {
@@ -376,11 +384,13 @@ func (t *Transport) StartJob(
 	command string,
 	timeoutMs int,
 	workdir string,
+	description ...string,
 ) (*ShellJobResult, error) {
 	payload, err := json.Marshal(map[string]any{
-		"command":    command,
-		"timeout_ms": timeoutMs,
-		"workdir":    workdir,
+		"description": firstDescription(description),
+		"command":     command,
+		"timeout_ms":  timeoutMs,
+		"workdir":     workdir,
 	})
 	if err != nil {
 		return nil, err
@@ -398,9 +408,27 @@ func (t *Transport) StartJob(
 	return &result, nil
 }
 
-func (t *Transport) ListJobs(ctx context.Context) (*ShellJobListResult, error) {
+func firstDescription(values []string) string {
+	if len(values) > 0 {
+		return values[0]
+	}
+	return ""
+}
+
+func (t *Transport) ListJobs(ctx context.Context, page ...int) (*ShellJobListResult, error) {
+	request := map[string]int{}
+	if len(page) > 0 {
+		request["offset"] = page[0]
+	}
+	if len(page) > 1 {
+		request["limit"] = page[1]
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
 	var result ShellJobListResult
-	if err := t.doFileRequest(ctx, "/jobs/list", []byte("{}"), &result); err != nil {
+	if err := t.doFileRequest(ctx, "/jobs/list", payload, &result); err != nil {
 		return nil, err
 	}
 	if result.Error != "" {
@@ -433,10 +461,10 @@ func (t *Transport) jobAction(
 	if err := t.doFileRequest(ctx, path, payload, &result); err != nil {
 		return nil, err
 	}
-	if result.Error != "" {
-		return nil, fmt.Errorf("%s", result.Error)
-	}
 	if result.JobID == "" {
+		if result.Error != "" {
+			return nil, fmt.Errorf("%s", result.Error)
+		}
 		return nil, fmt.Errorf("server returned incomplete job result")
 	}
 	return &result, nil
@@ -922,7 +950,8 @@ func parseSSE(r io.Reader, aesKey []byte) ([]LineEvent, error) {
 			events = append(events, LineEvent{Warning: warning.Message})
 		case "result":
 			var result struct {
-				ExitCode *int `json:"exit_code"`
+				JobID    string `json:"job_id"`
+				ExitCode *int   `json:"exit_code"`
 			}
 			if err := json.Unmarshal(payload, &result); err != nil {
 				return nil, fmt.Errorf("decode SSE result event: %w", err)
@@ -935,10 +964,11 @@ func parseSSE(r io.Reader, aesKey []byte) ([]LineEvent, error) {
 					Warning: "MCP retained output was truncated at 1 MiB",
 				})
 			}
-			events = append(events, LineEvent{ExitCode: result.ExitCode})
+			events = append(events, LineEvent{JobID: result.JobID, ExitCode: result.ExitCode})
 			terminalSeen = true
 		case "error":
 			var eventError struct {
+				JobID    string `json:"job_id"`
 				Message  string `json:"message"`
 				TimedOut bool   `json:"timed_out,omitempty"`
 			}
@@ -954,6 +984,7 @@ func parseSSE(r io.Reader, aesKey []byte) ([]LineEvent, error) {
 				})
 			}
 			events = append(events, LineEvent{
+				JobID:    eventError.JobID,
 				Error:    eventError.Message,
 				TimedOut: eventError.TimedOut,
 			})

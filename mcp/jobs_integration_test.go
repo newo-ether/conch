@@ -53,6 +53,9 @@ func TestTransportDurableJobLifecycleOverEncryptedProtocol(t *testing.T) {
 			KeyPair: keyPair,
 		}))
 	}
+	mux.Handle("POST /execute", auth(&handler.ExecuteHandler{
+		Jobs: manager, APIKey: []byte(apiKey), KeyPair: keyPair,
+	}))
 	mux.HandleFunc("GET /public-key", func(w http.ResponseWriter, r *http.Request) {
 		nonce, err := conchcrypto.GenerateNonce()
 		if err != nil {
@@ -73,7 +76,7 @@ func TestTransportDurableJobLifecycleOverEncryptedProtocol(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		command = "Write-Output 'job-output'"
 	}
-	started, err := transport.StartJob(context.Background(), command, 0, "")
+	started, err := transport.StartJob(context.Background(), command, 0, "", "Verify durable background output")
 	if err != nil {
 		t.Fatalf("StartJob: %v", err)
 	}
@@ -95,16 +98,40 @@ func TestTransportDurableJobLifecycleOverEncryptedProtocol(t *testing.T) {
 	if finished == nil || finished.State != shell.JobStateSucceeded {
 		t.Fatalf("finished = %#v", finished)
 	}
-	if finished.Output == "" {
-		t.Fatal("terminal job output missing")
+	if finished.Output == "" || finished.Description != "Verify durable background output" {
+		t.Fatalf("terminal output or description missing: %#v", finished)
+	}
+
+	events, err := transport.Execute(context.Background(), command, 5000, "", "Verify retained foreground output")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var foregroundID string
+	for _, event := range events {
+		if event.ExitCode != nil {
+			foregroundID = event.JobID
+		}
+	}
+	foreground, err := transport.GetJob(context.Background(), foregroundID)
+	if err != nil || foreground.State != shell.JobStateSucceeded || foreground.Output == "" ||
+		foreground.Description != "Verify retained foreground output" {
+		t.Fatalf("foreground result = %#v, err = %v", foreground, err)
 	}
 
 	list, err := transport.ListJobs(context.Background())
 	if err != nil {
 		t.Fatalf("ListJobs: %v", err)
 	}
-	if len(list.Jobs) != 1 || list.Jobs[0].Output != "" {
+	if len(list.Jobs) != 2 || list.Jobs[0].Output != "" {
 		t.Fatalf("list result = %#v", list.Jobs)
+	}
+	page, err := transport.ListJobs(context.Background(), 0, 1)
+	if err != nil || len(page.Jobs) != 1 || !page.HasMore || page.NextOffset != 1 || page.Total != 2 {
+		t.Fatalf("first page = %#v, err = %v", page, err)
+	}
+	next, err := transport.ListJobs(context.Background(), page.NextOffset, 1)
+	if err != nil || len(next.Jobs) != 1 || next.HasMore || next.Jobs[0].JobID == page.Jobs[0].JobID {
+		t.Fatalf("next page = %#v, err = %v", next, err)
 	}
 	ack, err := transport.AcknowledgeJob(context.Background(), started.JobID)
 	if err != nil {
@@ -112,5 +139,28 @@ func TestTransportDurableJobLifecycleOverEncryptedProtocol(t *testing.T) {
 	}
 	if !ack.Acknowledged {
 		t.Fatalf("ack = %#v", ack)
+	}
+	retained, err := transport.GetJob(context.Background(), started.JobID)
+	if err != nil || retained.Output != finished.Output || retained.Description != finished.Description {
+		t.Fatalf("ack lost retained result: %#v, err = %v", retained, err)
+	}
+	timeoutCommand := "sleep 10"
+	if runtime.GOOS == "windows" {
+		timeoutCommand = "Start-Sleep -Seconds 10"
+	}
+	failedEvents, err := transport.Execute(context.Background(), timeoutCommand, 100, "", "Verify failed foreground retention")
+	if err != nil {
+		t.Fatalf("timed-out Execute: %v", err)
+	}
+	var failedID string
+	for _, event := range failedEvents {
+		if event.Error != "" {
+			failedID = event.JobID
+		}
+	}
+	failed, err := transport.GetJob(context.Background(), failedID)
+	if err != nil || failed.State != shell.JobStateFailed || failed.Error == "" ||
+		failed.Description != "Verify failed foreground retention" {
+		t.Fatalf("failed foreground snapshot must stay retrievable: %#v, err = %v", failed, err)
 	}
 }

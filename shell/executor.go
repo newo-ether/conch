@@ -18,9 +18,11 @@ const (
 	MaxConcurrentCommands = 10
 	MaxCommandBytes       = 64 << 10
 	MaxWorkdirBytes       = 32 << 10
+	MaxDescriptionBytes   = 4 << 10
 )
 
 type LineEvent struct {
+	JobID    string `json:"job_id,omitempty"`
 	Line     string `json:"line,omitempty"`
 	Stream   string `json:"stream,omitempty"`
 	ExitCode *int   `json:"exit_code,omitempty"`
@@ -39,9 +41,10 @@ type LineEvent struct {
 }
 
 type Request struct {
-	Command   string `json:"command"`
-	TimeoutMs int    `json:"timeout_ms"`
-	Workdir   string `json:"workdir"`
+	Description string `json:"description,omitempty"`
+	Command     string `json:"command"`
+	TimeoutMs   int    `json:"timeout_ms"`
+	Workdir     string `json:"workdir"`
 }
 
 type processTreeController interface {
@@ -89,6 +92,11 @@ func (e *Executor) ExecuteWithMaxTimeout(
 		}
 		if len(req.Workdir) > MaxWorkdirBytes {
 			ch <- LineEvent{Error: "workdir exceeds 32KB limit"}
+			return
+		}
+
+		if len(req.Description) > MaxDescriptionBytes {
+			ch <- LineEvent{Error: "description exceeds 4KB limit"}
 			return
 		}
 

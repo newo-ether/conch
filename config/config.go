@@ -21,7 +21,7 @@ type Config struct {
 	JobRetention      time.Duration
 	MaxJobRuntime     time.Duration
 	MaxJobOutputBytes int
-	MaxJobs           int
+	MaxJobs           int // Deprecated: snapshots expire by time only.
 	TrustedProxies    []string
 }
 
@@ -50,10 +50,6 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxJobs, err := envInt("CONCH_MAX_JOBS", 100)
-	if err != nil {
-		return nil, err
-	}
 	allowNoAuth, err := envBool("CONCH_ALLOW_NO_AUTH", false)
 	if err != nil {
 		return nil, err
@@ -70,7 +66,6 @@ func Load() (*Config, error) {
 		JobRetention:      time.Duration(retentionHours) * time.Hour,
 		MaxJobRuntime:     time.Duration(maxJobRuntimeSeconds) * time.Second,
 		MaxJobOutputBytes: maxJobOutputBytes,
-		MaxJobs:           maxJobs,
 		TrustedProxies:    envList("CONCH_TRUSTED_PROXIES"),
 	}
 	if err := cfg.Validate(); err != nil {
@@ -99,8 +94,6 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("CONCH_MAX_JOB_TIMEOUT_SECONDS must be between 1 and 604800")
 	case c.MaxJobOutputBytes <= 0 || c.MaxJobOutputBytes > 64<<20:
 		return fmt.Errorf("CONCH_MAX_JOB_OUTPUT_BYTES must be between 1 and 67108864")
-	case c.MaxJobs <= 0 || c.MaxJobs > 10000:
-		return fmt.Errorf("CONCH_MAX_JOBS must be between 1 and 10000")
 	}
 	for _, proxy := range c.TrustedProxies {
 		if net.ParseIP(proxy) != nil {

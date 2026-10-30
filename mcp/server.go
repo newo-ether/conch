@@ -96,7 +96,7 @@ var allTools = []Tool{
 	},
 	{
 		Name:        "shell_job_ack",
-		Description: "Acknowledge and delete one durably settled terminal job after the caller has retained its result. Running or settling jobs are rejected.",
+		Description: "Acknowledge one durably settled terminal result. The job remains queryable until time retention expires. Running or settling jobs are rejected.",
 		InputSchema: JSONSchema{
 			Type: "object",
 			Properties: map[string]JSONProp{
@@ -654,11 +654,11 @@ func (s *Server) doShellExecute(ctx context.Context, t *Transport, args map[stri
 	}
 	workdir, _ := args["workdir"].(string)
 
-	events, err := t.Execute(ctx, command, timeoutMs, workdir)
+	events, err := t.Execute(ctx, command, timeoutMs, workdir, shellDescription(args))
 	if err != nil {
 		return errorResult(fmt.Sprintf("Conch error: %v", err)), nil
 	}
-	return formatShellOutput(events), nil
+	return formatShellOutput(selectShellEvents(events, args)), nil
 }
 
 func (s *Server) doShellJob(
@@ -679,13 +679,13 @@ func (s *Server) doShellJob(
 			timeoutMs = int(value)
 		}
 		workdir, _ := args["workdir"].(string)
-		job, err := t.StartJob(ctx, command, timeoutMs, workdir)
+		job, err := t.StartJob(ctx, command, timeoutMs, workdir, shellDescription(args))
 		if err != nil {
 			return errorResult(fmt.Sprintf("shell_start error: %v", err)), nil
 		}
 		result = job
 	case "shell_jobs":
-		jobs, err := t.ListJobs(ctx)
+		jobs, err := t.ListJobs(ctx, shellLineCount(args, "offset"), shellLineCount(args, "limit"))
 		if err != nil {
 			return errorResult(fmt.Sprintf("shell_jobs error: %v", err)), nil
 		}
@@ -719,6 +719,11 @@ func (s *Server) doShellJob(
 		return errorResult("unknown shell job action"), nil
 	}
 
+	if job, ok := result.(*ShellJobResult); ok {
+		preview := *job
+		preview.Output = selectShellOutput(preview.Output, args)
+		result = &preview
+	}
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return errorResult(fmt.Sprintf("encode shell job result: %v", err)), nil
@@ -731,6 +736,12 @@ func (s *Server) doShellJob(
 func formatShellOutput(events []LineEvent) ToolCallResult {
 	var output strings.Builder
 	hasError := false
+	for _, event := range events {
+		if event.JobID != "" {
+			fmt.Fprintf(&output, "job_id: %s\n", event.JobID)
+			break
+		}
+	}
 	for _, evt := range events {
 		switch {
 		case evt.Warning != "":

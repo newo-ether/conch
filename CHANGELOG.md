@@ -5,6 +5,30 @@ All notable changes to Conch are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.0.24] - 2026-10-30
+### Added
+- Record a shell call description in durable job metadata and accept `description`
+  on all MCP shell tools.
+- Support combined `head_lines` and `tail_lines` output previews without repeated
+  overlap, with an omitted-line count and terminal evidence preserved.
+- Page retained job listings with `offset`, `limit`, `total`, `next_offset` and
+  `has_more`; cap each metadata page at 100 jobs and 8 MiB of encoded JSON.
+### Changed
+- Persist foreground shell executions as durable jobs before reporting completion.
+  Completed output remains available after acknowledgement and server restart until
+  the configured time retention expires.
+- Remove count-based job eviction. `CONCH_MAX_JOBS` is deprecated and ignored;
+  `CONCH_JOB_RETENTION_HOURS` and the existing per-job output limit still apply.
+### Fixed
+- Preserve failed job snapshots when the job's own error is returned, instead of
+  mistaking an existing failed job for a transport failure.
+### Compatibility
+- Upgrade servers before MCP clients to enable retained foreground jobs, description
+  persistence and paged history. Existing wire callers may omit descriptions; the
+  MCP schemas require a description for new calls. No authentication or encryption
+  downgrade is introduced. Existing configurations and credential bytes are retained.
+
 ## [1.0.23] - 2026-10-17
 ### Added
 - `/file/read` responses carry `sha256`, the hash of the whole file (also for

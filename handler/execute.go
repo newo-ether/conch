@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 )
 
 type ExecuteHandler struct {
+	Jobs     *shell.JobManager
 	Executor *shell.Executor
 	APIKey   []byte
 	KeyPair  *crypto.KeyPair
@@ -89,7 +91,14 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events := h.Executor.Execute(r.Context(), req)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	var events <-chan shell.LineEvent
+	if h.Jobs != nil {
+		events = h.Jobs.Execute(ctx, req)
+	} else {
+		events = h.Executor.Execute(ctx, req)
+	}
 	responseController := http.NewResponseController(w)
 	var sequence uint64
 
@@ -106,15 +115,17 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// timed_out is the machine-readable discriminator. The message text is for
 				// humans only; clients decide whether to promote a command to a background
 				// job from this flag alone, never by pattern-matching the message.
+				"job_id":    evt.JobID,
 				"message":   evt.Error,
 				"timed_out": evt.TimedOut,
 			})
 			eventName, payload = "error", string(data)
 		} else if evt.ExitCode != nil {
-			data, _ := json.Marshal(map[string]int{"exit_code": *evt.ExitCode})
+			data, _ := json.Marshal(map[string]any{"exit_code": *evt.ExitCode, "job_id": evt.JobID})
 			eventName, payload = "result", string(data)
 		} else {
 			data, _ := json.Marshal(map[string]string{
+				"job_id": evt.JobID,
 				"line":   evt.Line,
 				"stream": evt.Stream,
 			})

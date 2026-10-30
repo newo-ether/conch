@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -195,11 +196,11 @@ func TestJobManagerAcknowledgesTerminalJobIdempotently(t *testing.T) {
 	if err != nil || !acknowledged {
 		t.Fatalf("Acknowledge = %v, %v", acknowledged, err)
 	}
-	if _, ok := manager.Get(job.JobID); ok {
-		t.Fatal("acknowledged terminal job remains in memory")
+	if retained, ok := manager.Get(job.JobID); !ok || retained.Output != "acknowledge\n" {
+		t.Fatalf("ACK discarded the retained result: %#v, found %v", retained, ok)
 	}
-	if _, err := os.Stat(filepath.Join(dir, job.JobID+".json")); !os.IsNotExist(err) {
-		t.Fatalf("acknowledged terminal snapshot still exists: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, job.JobID+".json")); err != nil {
+		t.Fatalf("ACK discarded the durable snapshot: %v", err)
 	}
 	acknowledged, err = manager.Acknowledge(job.JobID)
 	if err != nil || !acknowledged {
@@ -311,6 +312,73 @@ func TestJobManagerCloseCancelsJobsAndRejectsNewStarts(t *testing.T) {
 	}
 	if _, err := manager.Start(Request{Command: printCommand("late")}); err == nil {
 		t.Fatal("Start succeeded after Close")
+	}
+}
+
+func TestJobManagerForegroundPersistsBeforeReturningTerminalEvent(t *testing.T) {
+	dir := t.TempDir()
+	manager := newTestJobManager(t, dir)
+	var id string
+	for event := range manager.Execute(context.Background(), Request{Command: printCommand("foreground"), Description: "verify retained foreground"}) {
+		id = event.JobID
+		if event.ExitCode != nil {
+			job, ok := manager.Get(id)
+			if !ok || job.State != JobStateSucceeded || job.Description != "verify retained foreground" {
+				t.Fatalf("terminal event preceded durable settlement: %#v, found %v", job, ok)
+			}
+		}
+	}
+	reloaded := newTestJobManager(t, dir)
+	job, ok := reloaded.Get(id)
+	if !ok || job.Output != "foreground\n" || job.Description != "verify retained foreground" {
+		t.Fatalf("foreground recovery = %#v, found %v", job, ok)
+	}
+}
+
+func TestJobManagerForegroundCancellationRetainsStoppedResult(t *testing.T) {
+	manager := newTestJobManager(t, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	events := manager.Execute(ctx, Request{Command: sleepCommand()})
+	jobs := manager.List()
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %#v", jobs)
+	}
+	cancel()
+	for range events {
+	}
+	if job := waitForTerminalJob(t, manager, jobs[0].JobID); job.State != JobStateStopped {
+		t.Fatalf("cancelled foreground = %#v", job)
+	}
+}
+
+func TestJobRetentionIgnoresCountAndExpiresAcknowledgedSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	for index := 0; index < 125; index++ {
+		id := fmt.Sprintf("%024x", index)
+		writeJobSnapshot(t, filepath.Join(dir, id+".json"), Job{
+			JobID: id, State: JobStateSucceeded, CreatedAt: now, StartedAt: now, FinishedAt: &now,
+		})
+	}
+	manager := newTestJobManager(t, dir)
+	if jobs := manager.List(); len(jobs) != 125 {
+		t.Fatalf("count eviction removed recent snapshots: %d", len(jobs))
+	}
+	const id = "000000000000000000000000"
+	if _, err := manager.Acknowledge(id); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := newTestJobManager(t, dir)
+	if _, ok := reloaded.Get(id); !ok {
+		t.Fatal("acknowledged snapshot missing after restart")
+	}
+	expired := now.Add(-2 * time.Hour)
+	reloaded.jobs[id].FinishedAt = &expired
+	if _, ok := reloaded.Get(id); ok {
+		t.Fatal("expired acknowledged snapshot retained")
+	}
+	if _, err := os.Stat(filepath.Join(dir, id+".json")); !os.IsNotExist(err) {
+		t.Fatalf("expired file still exists: %v", err)
 	}
 }
 

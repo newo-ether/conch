@@ -60,6 +60,7 @@ func main() {
 		log.Fatalf("failed to initialize shell job manager: %v", err)
 	}
 	executeHandler := &handler.ExecuteHandler{
+		Jobs:     jobManager,
 		Executor: executor,
 		APIKey:   apiKeyBytes,
 		KeyPair:  keyPair,
