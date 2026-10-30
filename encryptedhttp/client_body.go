@@ -11,12 +11,13 @@ import (
 )
 
 type responseBody struct {
-	outer    io.ReadCloser
-	input    *bufio.Reader
-	key      []byte
-	sequence uint64
-	pending  []byte
-	ended    bool
+	outer       io.ReadCloser
+	input       *bufio.Reader
+	key         []byte
+	sequence    uint64
+	pending     []byte
+	ended       bool
+	terminalErr error
 }
 
 func newResponseBody(outer io.ReadCloser, key []byte) *responseBody {
@@ -59,6 +60,9 @@ func (b *responseBody) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if b.terminalErr != nil {
+		return 0, b.terminalErr
+	}
 	for len(b.pending) == 0 && !b.ended {
 		kind, data, err := b.next()
 		if err != nil {
@@ -66,6 +70,15 @@ func (b *responseBody) Read(p []byte) (int, error) {
 		}
 		switch kind {
 		case "http_end":
+			// HTTP body EOF is independent of connection EOF and permits reuse.
+			// Reading one byte also catches data arriving after the terminal frame.
+			if _, err := b.input.Peek(1); err != io.EOF {
+				if err == nil {
+					err = errors.New("bytes after encrypted HTTP terminal frame")
+				}
+				b.terminalErr = err
+				return 0, err
+			}
 			b.ended = true
 		case "http_body":
 			var value struct{ Body []byte }

@@ -46,7 +46,7 @@ type interceptTransport func(*http.Request) (*http.Response, error)
 func (f interceptTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestClientRejectsMutatedStreamWithoutRetryingMutation(t *testing.T) {
-	for _, mutation := range []string{"reorder", "truncate", "kind", "duplicate"} {
+	for _, mutation := range []string{"reorder", "truncate", "kind", "duplicate", "post-body", "post-end", "garbage"} {
 		t.Run(mutation, func(t *testing.T) {
 			var count atomic.Int32
 			gateway, _ := New(testKey, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +75,12 @@ func TestClientRejectsMutatedStreamWithoutRetryingMutation(t *testing.T) {
 					frames[1] = strings.Replace(frames[1], "event: http_body", "event: http_end", 1)
 				case "duplicate":
 					frames = append(frames[:2], frames[1], frames[2])
+				case "post-body":
+					frames = append(frames, frames[1])
+				case "post-end":
+					frames = append(frames, frames[2])
+				case "garbage":
+					frames = append(frames, "untrusted trailing bytes")
 				}
 				response.Body = io.NopCloser(strings.NewReader(strings.Join(frames, "\n\n") + "\n\n"))
 				return response, nil

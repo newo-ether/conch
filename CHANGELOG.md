@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.25] - 2026-10-31
+### Fixed
+- Reject encrypted HTTP response bytes arriving after the authenticated terminal
+  frame, including delayed trailing data. Require completion of the outer HTTP
+  response body while retaining connection reuse and cancellation behavior.
+- Propagate encrypted HTTP flush failures through response-controller wrappers to
+  streaming applications. Preserve the first failure and stop later frames so
+  disconnected or slow readers do not retain application resources.
+### Compatibility
+- The encrypted HTTP wire format and required capabilities are unchanged. Upgrade
+  servers before clients as usual; no plaintext fallback or mutation retry is added.
+  These library fixes do not add a Conch listener or alter existing credentials.
+
 ## [1.0.24] - 2026-10-30
 ### Added
 - Record a shell call description in durable job metadata and accept `description`

@@ -143,13 +143,11 @@ func (w *responseWriter) frame(kind string, value any) error {
 			_, err = fmt.Fprintf(w.outer, "event: %s\ndata: %s\n\n", kind, encrypted)
 		}
 	}
-	w.err = err
 	if err == nil {
 		w.sequence++
-		if flush, ok := w.outer.(http.Flusher); ok {
-			flush.Flush()
-		}
+		err = w.flushOuter()
 	}
+	w.err = err
 	return err
 }
 func (w *responseWriter) WriteHeader(status int) {
@@ -174,11 +172,22 @@ func (w *responseWriter) Write(data []byte) (int, error) {
 	}
 	return written, w.err
 }
-func (w *responseWriter) Flush() {
+func (w *responseWriter) Flush() { _ = w.FlushError() }
+
+func (w *responseWriter) FlushError() error {
 	if !w.started {
 		w.WriteHeader(200)
 	}
-	if f, ok := w.outer.(http.Flusher); ok {
-		f.Flush()
+	if w.err == nil {
+		w.err = w.flushOuter()
 	}
+	return w.err
+}
+
+func (w *responseWriter) flushOuter() error {
+	err := http.NewResponseController(w.outer).Flush()
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
 }
