@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,4 +165,46 @@ func TestTransportDurableJobLifecycleOverEncryptedProtocol(t *testing.T) {
 		failed.Description != "Verify failed foreground retention" {
 		t.Fatalf("failed foreground snapshot must stay retrievable: %#v, err = %v", failed, err)
 	}
+
+	t.Run("missing workdir preserves actionable errors", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "missing folder")
+		for _, background := range []bool{false, true} {
+			var id string
+			if background {
+				started, err := transport.StartJob(context.Background(), command, 5000, missing)
+				if err != nil {
+					t.Fatalf("StartJob: %v", err)
+				}
+				id = started.JobID
+			} else {
+				events, err := transport.Execute(context.Background(), command, 5000, missing)
+				if err != nil {
+					t.Fatalf("Execute: %v", err)
+				}
+				for _, event := range events {
+					if event.Error != "" {
+						id = event.JobID
+					}
+				}
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				job, err := transport.GetJob(context.Background(), id)
+				if err != nil {
+					t.Fatalf("GetJob: %v", err)
+				}
+				if job.State == shell.JobStateFailed {
+					if !strings.Contains(job.Error, "workdir does not exist:") ||
+						!strings.Contains(job.Error, "missing folder") || job.Output != "" || job.ExitCode != nil {
+						t.Fatalf("missing workdir result: %#v", job)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("missing workdir did not fail: %#v", job)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+	})
 }

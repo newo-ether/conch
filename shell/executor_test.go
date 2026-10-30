@@ -2,12 +2,48 @@ package shell
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestExecutorReportsInvalidWorkdirWithoutRunningCommand(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "regular-file")
+	if err := os.WriteFile(file, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		workdir string
+		reason  string
+	}{
+		{"missing", filepath.Join(dir, "missing folder"), "workdir does not exist"},
+		{"file", file, "workdir is not a directory"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			executor := NewExecutor(time.Second, time.Second)
+			var gotError string
+			for event := range executor.Execute(context.Background(), Request{
+				Command: printCommand("MUST_NOT_RUN"), Workdir: test.workdir,
+			}) {
+				if event.ExitCode != nil || event.Stream != "" {
+					t.Fatalf("invalid workdir executed command: %#v", event)
+				}
+				gotError = event.Error
+			}
+			want := fmt.Sprintf("%s: %q", test.reason, test.workdir)
+			if gotError != want {
+				t.Fatalf("error = %q, want %q", gotError, want)
+			}
+		})
+	}
+}
 
 func TestExecutorReturnsNonZeroExitCodeWithoutTransportError(t *testing.T) {
 	executor := NewExecutor(5*time.Second, 5*time.Second)

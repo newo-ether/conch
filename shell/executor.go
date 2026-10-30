@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -126,6 +127,10 @@ func (e *Executor) ExecuteWithMaxTimeout(
 		cmd := newShellCommand(execCtx, req.Command)
 		setSysProcAttr(cmd)
 
+		if err := validateWorkdir(req.Workdir); err != nil {
+			ch <- LineEvent{Error: err.Error()}
+			return
+		}
 		if req.Workdir != "" {
 			cmd.Dir = req.Workdir
 		}
@@ -133,7 +138,7 @@ func (e *Executor) ExecuteWithMaxTimeout(
 		stdoutReader, stdoutWriter, err := os.Pipe()
 		if err != nil {
 			log.Printf("ERROR: failed to create stdout pipe: %v", err)
-			ch <- LineEvent{Error: "internal error"}
+			ch <- LineEvent{Error: fmt.Sprintf("failed to create stdout pipe: %v", err)}
 			return
 		}
 		stderrReader, stderrWriter, err := os.Pipe()
@@ -141,7 +146,7 @@ func (e *Executor) ExecuteWithMaxTimeout(
 			_ = stdoutReader.Close()
 			_ = stdoutWriter.Close()
 			log.Printf("ERROR: failed to create stderr pipe: %v", err)
-			ch <- LineEvent{Error: "internal error"}
+			ch <- LineEvent{Error: fmt.Sprintf("failed to create stderr pipe: %v", err)}
 			return
 		}
 
@@ -154,7 +159,12 @@ func (e *Executor) ExecuteWithMaxTimeout(
 			_ = stderrReader.Close()
 			_ = stderrWriter.Close()
 			log.Printf("ERROR: failed to start command: %v", err)
-			ch <- LineEvent{Error: "internal error"}
+			// The directory can disappear or lose access after preflight.
+			if workdirErr := validateWorkdir(req.Workdir); workdirErr != nil {
+				ch <- LineEvent{Error: workdirErr.Error()}
+			} else {
+				ch <- LineEvent{Error: fmt.Sprintf("failed to start command: %v", err)}
+			}
 			return
 		}
 
@@ -211,14 +221,13 @@ func (e *Executor) ExecuteWithMaxTimeout(
 			return
 		}
 		if cmd.ProcessState == nil {
-			log.Printf("ERROR: command wait produced no process state: %v", waitErr)
-			ch <- LineEvent{Error: "internal error"}
+			ch <- LineEvent{Error: "command ended without a process exit status"}
 			return
 		}
 		var exitErr *exec.ExitError
 		if waitErr != nil && !errors.As(waitErr, &exitErr) {
 			log.Printf("ERROR: failed waiting for command: %v", waitErr)
-			ch <- LineEvent{Error: "internal error"}
+			ch <- LineEvent{Error: fmt.Sprintf("failed to wait for command: %v", waitErr)}
 			return
 		}
 		exitCode := cmd.ProcessState.ExitCode()
@@ -226,6 +235,26 @@ func (e *Executor) ExecuteWithMaxTimeout(
 	}()
 
 	return ch
+}
+
+func validateWorkdir(workdir string) error {
+	if workdir == "" {
+		return nil
+	}
+	info, err := os.Stat(workdir)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("workdir does not exist: %q", workdir)
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("workdir access denied: %q", workdir)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot access workdir %q: %w", workdir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("workdir is not a directory: %q", workdir)
+	}
+	return nil
 }
 
 // scanStream forwards bounded lines while continuing to drain oversized lines. Continuing the

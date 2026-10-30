@@ -21,6 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Remove count-based job eviction. `CONCH_MAX_JOBS` is deprecated and ignored;
   `CONCH_JOB_RETENTION_HOURS` and the existing per-job output limit still apply.
 ### Fixed
+- Report a missing, inaccessible or non-directory `workdir` with its supplied path.
+  Shell startup and output-pipe failures now identify the failed operation and OS
+  reason instead of returning an undifferentiated `internal error`.
 - Preserve failed job snapshots when the job's own error is returned, instead of
   mistaking an existing failed job for a transport failure.
 ### Compatibility
