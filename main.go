@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -92,6 +93,13 @@ func main() {
 	mux.Handle("POST /jobs/ack", auth(&handler.JobHandler{
 		Action: "ack", Jobs: jobManager, APIKey: apiKeyBytes, KeyPair: keyPair,
 	}))
+	transfers, err := handler.NewFileTransfers(filepath.Join(cfg.JobDir, "file-transfers"))
+	if err != nil {
+		log.Fatalf("failed to initialize file transfers: %v", err)
+	}
+	defer transfers.Close()
+	transferHandler := &handler.FileTransferHandler{APIKey: apiKeyBytes, KeyPair: keyPair, Transfers: transfers}
+	mux.Handle("POST /file/transfer/", auth(transferHandler))
 	mux.Handle("POST /file/read", auth(fileReadHandler))
 	mux.Handle("POST /file/image", auth(fileImageHandler))
 	mux.Handle("POST /file/write", auth(fileWriteHandler))

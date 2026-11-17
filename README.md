@@ -264,6 +264,27 @@ Client                           Server
   |<--- SSE stream (encrypted) ----|
 ```
 
+## Binary file transfer protocol
+
+Authenticated `POST /file/transfer/{action}` uses the existing encrypted JSON request and signed encrypted response. A handler request is limited to 1 MiB, decoded chunks to 256 KiB, regular files to 1 GiB, and retained transfer entries to 64. Each request uses a fresh encrypted envelope. This HTTP API is used by Agora; it does not add a `conch-mcp` tool.
+
+| Action | Request fields | Result |
+|--------|----------------|--------|
+| `capabilities` | none | `chunk_bytes`, `max_bytes` |
+| `info` | absolute `path` | resolved `path`, `size`, `sha256` |
+| `read` | absolute `path`, expected `size`, `offset` | at most one Base64 `data` chunk, `size`, `offset` |
+| `begin` | random 32-hex `id`, absolute destination `path`, `size`, `sha256`, optional `overwrite` | private staging receipt, `state=writing`, `offset=0` |
+| `chunk` | `id`, exact current `offset`, Base64 `data` | accepted next `offset` |
+| `commit` | `id` | verified `path`, `size`, `sha256`, `state=committed` |
+| `status` | `id` | current receipt and offset |
+| `abort` | `id` | remove unpublished staging; keep a committed destination |
+
+Successful results include `ok=true`; application failures contain `error`. Destination parents must exist. No-overwrite publication uses Linux `renameat2(RENAME_NOREPLACE)`, with an atomic hard-link fallback only when that operation is unsupported; other platforms use atomic create-if-absent hard linking. Replacement uses the platform atomic replacement primitive. Unsupported filesystems fail without a weaker fallback. The complete staged size and SHA-256 are verified and flushed before publication. Sources are never deleted. A same-server copy follows the same protocol.
+
+Reads are stateless, not a frozen source handle. The client must hash all downloaded bytes against `info` before opening destination staging; changed source bytes must fail the copy. Base64 stays within the transport, never model arguments/results. Clients must not replay chunks or commit after uncertain delivery; use `status` to reconcile the accepted offset or completed receipt. `commit` returns the existing receipt if already committed. An unavailable/expired status leaves an uncertain commit outcome: inspect the destination before starting another transfer.
+
+Staging is private in the target directory, with cleanup journals under `CONCH_JOB_DIR/file-transfers`. After 15 idle minutes, entries and staging expire; cleanup runs once a minute. Startup removes journaled orphan staging. Completed receipts are process-local and do not survive restart. Cleanup failures retain the journal for a later attempt. This is a bounded copy protocol, without cross-restart resume or a power-loss transaction guarantee.
+
 ## MCP (Claude Desktop integration)
 
 The `conch-mcp` binary exposes bounded synchronous shell execution, explicit durable job lifecycle tools, atomic file operations, and device discovery over stdio Model Context Protocol. Devices may be offline at MCP startup and reconnect lazily; concurrent requests and MCP cancellation notifications are supported.

@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.26] - 2026-11-17
+### Added
+- Add authenticated binary file transfer endpoints for bounded source reads,
+  private destination staging, SHA-256 and size verification, atomic publication,
+  status reconciliation and cancellation cleanup. Transfers support regular files
+  up to 1 GiB in 256 KiB chunks, without exposing binary bodies to model context.
+- Retain up to 64 process-local transfer receipts for 15 idle minutes and remove
+  journaled abandoned staging at startup. Uncertain mutations are reconciled through
+  status queries rather than automatically replayed.
+### Fixed
+- Use Linux `renameat2(RENAME_NOREPLACE)` for atomic no-overwrite publication,
+  including Android environments that prohibit hard links. Fall back to atomic
+  hard linking only when the rename operation is unsupported; unsupported
+  filesystems fail without a check-then-overwrite fallback.
+- Reject destinations that collide with their transfer staging path, including
+  case-insensitive Windows names, before creating files, journals or receipts.
+### Compatibility
+- Upgrade Conch servers before enabling binary transfers in Agora. Existing clients,
+  configurations, credentials and encrypted transport remain compatible; clients
+  must probe transfer capabilities and never fall back to plaintext or replay an
+  uncertain mutation. This HTTP API does not add a `conch-mcp` tool.
+- Destination parents must exist and overwrite is disabled by default. Sources are
+  retained; destination filesystems must support atomic no-overwrite publication
+  or explicit atomic replacement. Status receipts do not survive server restart,
+  so an unavailable receipt after an uncertain commit requires destination inspection.
+
 ## [1.0.25] - 2026-10-31
 ### Fixed
 - Reject encrypted HTTP response bytes arriving after the authenticated terminal
