@@ -123,6 +123,9 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else if evt.ExitCode != nil {
 			data, _ := json.Marshal(map[string]any{"exit_code": *evt.ExitCode, "job_id": evt.JobID})
 			eventName, payload = "result", string(data)
+		} else if evt.Backgrounded {
+			data, _ := json.Marshal(map[string]any{"job_id": evt.JobID})
+			eventName, payload = "backgrounded", string(data)
 		} else {
 			data, _ := json.Marshal(map[string]string{
 				"job_id": evt.JobID,
@@ -145,6 +148,12 @@ func (h *ExecuteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		flusher.Flush()
 		sequence++
+		if evt.Backgrounded {
+			// The response ends here: the process keeps running as a durable job and the client
+			// tracks it through the job endpoints. The job manager has already detached the job
+			// from this request's context, so returning does not cancel it.
+			return
+		}
 	}
 }
 

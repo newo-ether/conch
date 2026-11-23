@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.27] - 2026-11-24
+### Changed
+- Foreground shell executions that exceed `timeout_ms` are no longer killed. The
+  server emits a `backgrounded` SSE event carrying the job id, releases the
+  foreground response, and keeps the process tree running as a durable job until
+  the runtime cap. This matches the wait-budget semantics of other coding agents
+  and removes surprise termination of long builds started in the foreground.
+- `timeout_ms` on `shell_execute` now means the foreground wait budget;
+  `timeout_ms` on `shell_start` remains the runtime cap at which the process
+  tree is killed. Background jobs clamp `timeout_ms` to the runtime cap.
+- `CONCH_MAX_JOB_TIMEOUT_SECONDS` now defaults to 1800 seconds (30 minutes) with
+  a hard maximum of 7200 seconds (2 hours), down from a 24 hour default. Job
+  output retention is unchanged.
+- Job state `timed_out` is reported separately from `failed`. Foreground jobs
+  that were backgrounded and later hit the runtime cap settle as `timed_out`
+  without an exit code; genuine process or spawn failures still report `failed`.
+### Added
+- Capability flag `foreground_backgrounding` so clients can detect wait-budget
+  semantics instead of guessing from the version string.
+- The MCP transport parses the `backgrounded` event and `shell_execute` reports
+  the surviving job id with instructions to poll `shell_job_get` or stop the job
+  with `shell_job_stop`.
+### Compatibility
+- Older clients that do not know the `backgrounded` SSE event fail closed on
+  foreground timeouts instead of waiting for a completion that already arrived.
+  Upgrade Agora together with or before the servers it talks to.
+
 ## [1.0.26] - 2026-11-17
 ### Added
 - Add authenticated binary file transfer endpoints for bounded source reads,

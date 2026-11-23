@@ -143,11 +143,11 @@ curl -s http://localhost:14216/health
 | `CONCH_PORT` | `14216` | HTTP listen port |
 | `CONCH_API_KEY` | _(required)_ | Pre-shared key for HMAC signing and key-exchange verification. Server refuses to start without it unless `CONCH_ALLOW_NO_AUTH=true`. |
 | `CONCH_ALLOW_NO_AUTH` | `false` | Start without an API key. Encryption and signing are disabled; all requests are accepted in plaintext. |
-| `CONCH_TIMEOUT` | `30` | Default command timeout in seconds |
-| `CONCH_MAX_TIMEOUT` | `1800` | Maximum allowed timeout in seconds (30 minutes) |
+| `CONCH_TIMEOUT` | `30` | Default foreground wait budget in seconds; a foreground command still running when the budget is spent is not killed but reported as backgrounded |
+| `CONCH_MAX_TIMEOUT` | `1800` | Maximum foreground wait budget, and the hard lifetime cap of any command, in seconds (30 minutes) |
 | `CONCH_JOB_DIR` | OS user config directory | Directory containing durable snapshots of all shell executions |
 | `CONCH_JOB_RETENTION_HOURS` | `24` | Retain completed foreground and background jobs for this many hours |
-| `CONCH_MAX_JOB_TIMEOUT_SECONDS` | `86400` | Maximum runtime of one background job |
+| `CONCH_MAX_JOB_TIMEOUT_SECONDS` | `1800` | Default runtime of one background job (30 minutes); a `timeout_ms` on `/jobs/start` overrides it per job. Configurable up to 7200 (2 hours) |
 | `CONCH_MAX_JOB_OUTPUT_BYTES` | `262144` | Maximum rolling output retained per job |
 | `CONCH_MAX_JOBS` | _(ignored)_ | Deprecated; snapshots expire only by time, never by count or acknowledgement |
 | `CONCH_TRUSTED_PROXIES` | _(empty)_ | Comma-separated proxy IPs/CIDRs allowed to supply `X-Forwarded-For`; untrusted forwarding headers are ignored |
@@ -188,7 +188,7 @@ Clients verify this signature before trusting the key.
 
 ### `POST /execute`
 
-Execute a shell command and retain its job snapshot under `CONCH_JOB_DIR`. Line and terminal events carry `job_id`, retrievable through `/jobs/get` until time retention expires. The terminal event is published only after its snapshot is durable. Disconnecting cancels this foreground process, then drains and retains its final state. Every request carries an HMAC signature that proves API key possession.
+Execute a shell command and retain its job snapshot under `CONCH_JOB_DIR`. Line and terminal events carry `job_id`, retrievable through `/jobs/get` until time retention expires. The terminal event is published only after its snapshot is durable. Disconnecting cancels this foreground process while its wait budget is unspent, then drains and retains its final state. When the wait budget is spent with the command still running, the server sends a `backgrounded` event carrying `job_id` and ends the response; the process keeps running under the hard cap (`CONCH_MAX_TIMEOUT`) and the client tracks it through the job endpoints. Every request carries an HMAC signature that proves API key possession.
 
 **Headers:**
 
@@ -217,7 +217,7 @@ After decryption, the body is JSON:
 |-------|------|----------|-------------|
 | `command` | string | yes | Shell command to execute |
 | `description` | string | no | Purpose of this execution, retained with the job (4 KiB UTF-8 maximum); required by current tool schemas |
-| `timeout_ms` | integer | no | Per-command timeout in milliseconds (capped at `CONCH_MAX_TIMEOUT`) |
+| `timeout_ms` | integer | no | Foreground wait budget in milliseconds (capped at `CONCH_MAX_TIMEOUT`); a command still running when it is spent continues as a background job |
 | `workdir` | string | no | Working directory for the command |
 
 **Response:** `text/event-stream` with encrypted data payloads (each `data:` line is base64url-encoded AES-256-GCM ciphertext):
@@ -246,7 +246,7 @@ Background jobs use the same authenticated and encrypted POST envelope as `/exec
 
 List pages default to at most 100 records and 8 MiB of encoded metadata, keeping encrypted responses within the client read bound even with escaped long commands. Use `next_offset` while `has_more` is true. Each page reflects current newest-first ordering; new jobs or expiry can shift offsets between calls. Paging never deletes stored jobs. Foreground and background jobs share retention measured from completion, bounded rolling output and the global execution concurrency limit.
 
-Job states are `running`, `stopping`, `settling`, `succeeded`, `failed`, `stopped`, and `interrupted`. `settling` means the process has ended but its terminal snapshot is still retrying durable persistence and cannot yet be acknowledged. A job that was active when Conch restarted is recovered as `interrupted`; Conch never reports an orphaned process as still running.
+Job states are `running`, `stopping`, `settling`, `succeeded`, `failed`, `timed_out`, `stopped`, and `interrupted`. `settling` means the process has ended but its terminal snapshot is still retrying durable persistence and cannot yet be acknowledged. `timed_out` means the runtime budget killed the process, as opposed to `failed` which reports the command's own nonzero exit or an execution error. A job that was active when Conch restarted is recovered as `interrupted`; Conch never reports an orphaned process as still running.
 
 ### Protocol summary
 
@@ -328,7 +328,7 @@ The `conch-mcp` binary exposes bounded synchronous shell execution, explicit dur
 |-----------|------|----------|---------|-------------|
 | `device` | string | yes* | — | Target device name (required when managing multiple devices) |
 | `command` | string | yes | — | Shell command to execute |
-| `timeout_ms` | integer | yes | — | Per-call execution timeout in milliseconds (1–1800000); the MCP request deadline is this value plus a small settlement margin, and the server enforces the 30-minute ceiling |
+| `timeout_ms` | integer | yes | — | Foreground wait budget in milliseconds (1–1800000); the MCP request deadline is this value plus a small settlement margin, and the server enforces the 30-minute ceiling. A command still running when the budget is spent keeps running as a durable job and the result says so |
 | `workdir` | string | no | — | Working directory |
 
 Every `shell_*` tool requires `description` describing that call's purpose. Execute/start store it as job metadata; later list/get/stop/ack descriptions describe the current action and never replace the original job purpose. `shell_execute`, `shell_start`, and `shell_job_get` accept optional `head_lines` and `tail_lines` together. Their model-facing preview marks omitted middle lines and never duplicates overlap; retained output is unchanged. `shell_jobs` accepts `offset` and `limit` for paging.

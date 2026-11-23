@@ -150,20 +150,46 @@ func TestTransportDurableJobLifecycleOverEncryptedProtocol(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		timeoutCommand = "Start-Sleep -Seconds 10"
 	}
-	failedEvents, err := transport.Execute(context.Background(), timeoutCommand, 100, "", "Verify failed foreground retention")
+	backgroundedEvents, err := transport.Execute(
+		context.Background(), timeoutCommand, 100, "", "Verify backgrounded foreground retention",
+	)
 	if err != nil {
-		t.Fatalf("timed-out Execute: %v", err)
+		t.Fatalf("backgrounded Execute: %v", err)
 	}
-	var failedID string
-	for _, event := range failedEvents {
-		if event.Error != "" {
-			failedID = event.JobID
+	var backgroundedID string
+	sawBackgrounded := false
+	for _, event := range backgroundedEvents {
+		if event.Backgrounded {
+			sawBackgrounded = true
+			backgroundedID = event.JobID
 		}
 	}
-	failed, err := transport.GetJob(context.Background(), failedID)
-	if err != nil || failed.State != shell.JobStateFailed || failed.Error == "" ||
-		failed.Description != "Verify failed foreground retention" {
-		t.Fatalf("failed foreground snapshot must stay retrievable: %#v, err = %v", failed, err)
+	if !sawBackgrounded || backgroundedID == "" {
+		t.Fatalf("foreground budget did not background the command: %#v", backgroundedEvents)
+	}
+	// The budget crossing is not terminal: the detached job runs on to its hard cap and then
+	// settles as timed out rather than failed.
+	running, err := transport.GetJob(context.Background(), backgroundedID)
+	if err != nil || running.State != shell.JobStateRunning ||
+		running.Description != "Verify backgrounded foreground retention" {
+		t.Fatalf("backgrounded job = %#v, err = %v", running, err)
+	}
+	var timedOut *ShellJobResult
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		timedOut, err = transport.GetJob(context.Background(), backgroundedID)
+		if err != nil {
+			t.Fatalf("GetJob: %v", err)
+		}
+		if timedOut.State != shell.JobStateRunning &&
+			timedOut.State != shell.JobStateStopping &&
+			timedOut.State != shell.JobStateSettling {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if timedOut == nil || timedOut.State != shell.JobStateTimedOut || timedOut.Error == "" {
+		t.Fatalf("hard-cap kill must settle as timed_out: %#v", timedOut)
 	}
 
 	t.Run("missing workdir preserves actionable errors", func(t *testing.T) {

@@ -44,6 +44,25 @@ data: {"message":"command timed out","timed_out":true}
 	}
 }
 
+func TestParseSSEBackgroundedTerminatesStreamWithoutExitCode(t *testing.T) {
+	events, err := parseSSE(strings.NewReader(`event: line
+data: {"line":"partial","stream":"stdout"}
+
+event: backgrounded
+data: {"job_id":"abc123"}
+
+`), nil)
+	if err != nil {
+		t.Fatalf("parseSSE: %v", err)
+	}
+	if len(events) != 2 || events[1].JobID != "abc123" || !events[1].Backgrounded {
+		t.Fatalf("events = %#v", events)
+	}
+	if events[1].ExitCode != nil || events[1].Error != "" {
+		t.Fatalf("backgrounded must not carry terminal fields: %#v", events[1])
+	}
+}
+
 func TestParseSSEFailsClosedOnDecryptionError(t *testing.T) {
 	_, err := parseSSE(strings.NewReader(`event: result
 data: definitely-not-ciphertext

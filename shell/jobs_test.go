@@ -351,6 +351,60 @@ func TestJobManagerForegroundCancellationRetainsStoppedResult(t *testing.T) {
 	}
 }
 
+func TestJobManagerForegroundBackgroundsAtWaitBudget(t *testing.T) {
+	manager, err := NewJobManager(
+		NewExecutor(5*time.Second, 1500*time.Millisecond),
+		t.TempDir(),
+		time.Hour,
+		5*time.Second,
+		4096,
+		20,
+	)
+	if err != nil {
+		t.Fatalf("NewJobManager: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := manager.Execute(ctx, Request{Command: sleepCommand(), TimeoutMs: 200})
+	var id string
+	sawBackgrounded := false
+	for event := range events {
+		if event.Backgrounded {
+			sawBackgrounded = true
+			id = event.JobID
+			// The request ending right after the notice must not cancel the detached job.
+			cancel()
+			if job, ok := manager.Get(id); !ok || job.State != JobStateRunning {
+				t.Fatalf("detached job after request cancel = %#v, found %v", job, ok)
+			}
+		}
+	}
+	if !sawBackgrounded || id == "" {
+		t.Fatal("foreground wait budget did not produce a backgrounded event")
+	}
+	// The stream closes only after the runner persists the terminal state, so the detached job
+	// must already show the hard-cap kill as timed_out rather than failed or stopped.
+	job, ok := manager.Get(id)
+	if !ok {
+		t.Fatal("backgrounded job disappeared")
+	}
+	if job.State != JobStateTimedOut || job.Error == "" || job.ExitCode != nil {
+		t.Fatalf("hard-cap kill must settle as timed_out without an exit code: %#v", job)
+	}
+}
+
+func TestJobManagerBackgroundJobTimeoutSettlesTimedOut(t *testing.T) {
+	manager := newTestJobManager(t, t.TempDir())
+	job, err := manager.Start(Request{Command: sleepCommand(), TimeoutMs: 200})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	finished := waitForTerminalJob(t, manager, job.JobID)
+	if finished.State != JobStateTimedOut || finished.Error == "" || finished.ExitCode != nil {
+		t.Fatalf("background timeout = %#v, want timed_out without an exit code", finished)
+	}
+}
+
 func TestJobRetentionIgnoresCountAndExpiresAcknowledgedSnapshots(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC()

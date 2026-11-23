@@ -28,6 +28,9 @@ type LineEvent struct {
 	Error    string `json:"error,omitempty"`
 	Warning  string `json:"warning,omitempty"`
 	TimedOut bool   `json:"timed_out,omitempty"`
+	// Backgrounded reports that the foreground wait budget was spent and the command keeps
+	// running as a durable job. It terminates the SSE stream without an exit code.
+	Backgrounded bool `json:"backgrounded,omitempty"`
 }
 
 // Transport handles the encrypted Conch protocol.
@@ -965,6 +968,15 @@ func parseSSE(r io.Reader, aesKey []byte) ([]LineEvent, error) {
 				})
 			}
 			events = append(events, LineEvent{JobID: result.JobID, ExitCode: result.ExitCode})
+			terminalSeen = true
+		case "backgrounded":
+			var backgrounded struct {
+				JobID string `json:"job_id"`
+			}
+			if err := json.Unmarshal(payload, &backgrounded); err != nil {
+				return nil, fmt.Errorf("decode SSE backgrounded event: %w", err)
+			}
+			events = append(events, LineEvent{JobID: backgrounded.JobID, Backgrounded: true})
 			terminalSeen = true
 		case "error":
 			var eventError struct {

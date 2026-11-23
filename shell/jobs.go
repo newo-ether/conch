@@ -25,6 +25,9 @@ const (
 	JobStateSettling    = "settling"
 	JobStateStopped     = "stopped"
 	JobStateInterrupted = "interrupted"
+	// JobStateTimedOut marks a process killed by its runtime budget. It stays distinct from
+	// JobStateFailed because a deadline kill says nothing about what the command itself did.
+	JobStateTimedOut = "timed_out"
 )
 
 type Job struct {
@@ -142,7 +145,9 @@ func (m *JobManager) Start(req Request) (Job, error) {
 }
 
 // Execute records foreground streams in the same store as background jobs. Disconnecting
-// still cancels the process; the runner drains and persists its final state independently.
+// still cancels the process while the foreground wait budget is unspent; once the budget is
+// spent the job detaches from the request and keeps running under the hard cap, and the runner
+// drains and persists its final state independently.
 func (m *JobManager) Execute(ctx context.Context, req Request) <-chan LineEvent {
 	events := make(chan LineEvent, 10)
 	if req.TimeoutMs <= 0 {
@@ -218,7 +223,7 @@ func (m *JobManager) start(req Request, parent context.Context, maxTimeout time.
 		if events != nil {
 			defer close(events)
 		}
-		m.run(ctx, req, id, maxTimeout, events)
+		m.run(ctx, req, id, maxTimeout, events, stopParent)
 	}()
 	return snapshot, nil
 }
@@ -288,12 +293,20 @@ func (m *JobManager) Acknowledge(id string) (bool, error) {
 	return true, nil
 }
 
-func (m *JobManager) run(ctx context.Context, req Request, id string, maxTimeout time.Duration, output chan LineEvent) {
+func (m *JobManager) run(
+	ctx context.Context,
+	req Request,
+	id string,
+	maxTimeout time.Duration,
+	output chan LineEvent,
+	detach func() bool,
+) {
+	sink := output
 	forward := func(event LineEvent) {
-		if output != nil {
+		if sink != nil {
 			event.JobID = id
 			select {
-			case output <- event:
+			case sink <- event:
 			case <-ctx.Done():
 			}
 		}
@@ -302,8 +315,28 @@ func (m *JobManager) run(ctx context.Context, req Request, id string, maxTimeout
 	if req.TimeoutMs <= 0 {
 		req.TimeoutMs = int(m.maxRuntime / time.Millisecond)
 	}
+	if output == nil {
+		// A background job has no foreground wait budget: the requested runtime IS the hard cap.
+		// Clamping maxTimeout to it keeps the executor from reporting a spurious backgrounded
+		// crossing and preserves the kill-at-timeout contract.
+		if requested := time.Duration(req.TimeoutMs) * time.Millisecond; requested < maxTimeout {
+			maxTimeout = requested
+		}
+	}
 	events := m.executor.ExecuteWithMaxTimeout(ctx, req, maxTimeout)
 	for event := range events {
+		if event.Backgrounded {
+			// The foreground caller stops watching here. Detach the job from the request context
+			// BEFORE delivering the notice: the handler returns right after sending it, and its
+			// cleanup would otherwise cancel this still-running job. Nobody reads the stream after
+			// the response ends, so forwarding stops as well.
+			if detach != nil {
+				_ = detach()
+			}
+			forward(event)
+			sink = nil
+			continue
+		}
 		m.mu.Lock()
 		job := m.jobs[id]
 		if job == nil {
@@ -322,14 +355,18 @@ func (m *JobManager) run(ctx context.Context, req Request, id string, maxTimeout
 		}
 		if event.Error != "" {
 			job.Error = event.Error
-			job.State = JobStateFailed
+			if event.TimedOut {
+				job.State = JobStateTimedOut
+			} else {
+				job.State = JobStateFailed
+			}
 		}
 		if event.ExitCode != nil {
 			code := *event.ExitCode
 			job.ExitCode = &code
 			if ctx.Err() != nil || job.State == JobStateStopping {
 				job.State = JobStateStopped
-			} else if job.State == JobStateFailed {
+			} else if job.State == JobStateFailed || job.State == JobStateTimedOut {
 				// Preserve an earlier executor/read failure even if the process itself exited zero.
 			} else if code == 0 {
 				job.State = JobStateSucceeded

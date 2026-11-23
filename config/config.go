@@ -42,7 +42,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxJobRuntimeSeconds, err := envInt("CONCH_MAX_JOB_TIMEOUT_SECONDS", 86400)
+	maxJobRuntimeSeconds, err := envInt("CONCH_MAX_JOB_TIMEOUT_SECONDS", 1800)
 	if err != nil {
 		return nil, err
 	}
@@ -90,8 +90,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("CONCH_JOB_DIR must not be empty")
 	case c.JobRetention < 0:
 		return fmt.Errorf("CONCH_JOB_RETENTION_HOURS must not be negative")
-	case c.MaxJobRuntime <= 0 || c.MaxJobRuntime > 7*24*time.Hour:
-		return fmt.Errorf("CONCH_MAX_JOB_TIMEOUT_SECONDS must be between 1 and 604800")
+	case c.MaxJobRuntime <= 0 || c.MaxJobRuntime > 2*time.Hour:
+		return fmt.Errorf("CONCH_MAX_JOB_TIMEOUT_SECONDS must be between 1 and 7200")
 	case c.MaxJobOutputBytes <= 0 || c.MaxJobOutputBytes > 64<<20:
 		return fmt.Errorf("CONCH_MAX_JOB_OUTPUT_BYTES must be between 1 and 67108864")
 	}

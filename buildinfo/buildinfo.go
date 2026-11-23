@@ -20,6 +20,7 @@ var Capabilities = []string{
 	"file_grep_context",
 	"file_read_bytes_read",
 	"file_read_sha256",
+	"foreground_backgrounding",
 	"job_ack",
 	"key_refresh",
 }

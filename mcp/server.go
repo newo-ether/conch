@@ -36,7 +36,7 @@ var allTools = []Tool{
 				"command": {Type: "string", Description: "The shell command to execute"},
 				"timeout_ms": {
 					Type:        "integer",
-					Description: "Required execution timeout in milliseconds; maximum 1800000 (30 minutes)",
+					Description: "Required foreground wait budget in milliseconds; maximum 1800000 (30 minutes). A command still running when the budget is spent is not killed: it keeps running as a durable job and the result returns its job_id",
 					Minimum:     minShellExecuteTimeoutMs,
 					Maximum:     maxShellExecuteTimeoutMs,
 				},
@@ -53,7 +53,7 @@ var allTools = []Tool{
 			Properties: map[string]JSONProp{
 				"device":     {Type: "string", Description: "The target device name"},
 				"command":    {Type: "string", Description: "The shell command to execute"},
-				"timeout_ms": {Type: "integer", Description: "Job timeout in milliseconds (server-bounded)"},
+				"timeout_ms": {Type: "integer", Description: "Job runtime cap in milliseconds; the job is killed when it is spent (default and ceiling are server-configured)"},
 				"workdir":    {Type: "string", Description: "Working directory for the command (optional)"},
 			},
 			Required: []string{"device", "command"},
@@ -746,6 +746,8 @@ func formatShellOutput(events []LineEvent) ToolCallResult {
 		switch {
 		case evt.Warning != "":
 			fmt.Fprintf(&output, "[warning] %s\n", evt.Warning)
+		case evt.Backgrounded:
+			fmt.Fprintf(&output, "[backgrounded] command did not finish within the foreground timeout and keeps running as job %s; poll with shell_job_get or stop with shell_job_stop\n", evt.JobID)
 		case evt.Error != "":
 			fmt.Fprintf(&output, "[error] %s\n", evt.Error)
 			hasError = true

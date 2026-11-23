@@ -39,6 +39,10 @@ type LineEvent struct {
 	// mistaking a command's own timeout for a deadline kill causes a non-idempotent command to be
 	// silently re-run.
 	TimedOut bool `json:"timed_out,omitempty"`
+	// Backgrounded marks the foreground wait budget as spent while the process keeps running:
+	// the command crosses into background execution and stays bounded by the hard cap. It is not
+	// terminal; the exit code or a TimedOut error still decides the final outcome.
+	Backgrounded bool `json:"backgrounded,omitempty"`
 }
 
 type Request struct {
@@ -121,10 +125,13 @@ func (e *Executor) ExecuteWithMaxTimeout(
 			timeout = maxTimeout
 		}
 
-		execCtx, cancel := context.WithTimeout(ctx, timeout)
+		// The wait budget only decides when a still-running command is reported as backgrounded;
+		// the process lifetime is bounded by maxTimeout alone. Killing at the budget would destroy
+		// work the caller explicitly wants to survive as a background job.
+		runCtx, cancel := context.WithTimeout(ctx, maxTimeout)
 		defer cancel()
 
-		cmd := newShellCommand(execCtx, req.Command)
+		cmd := newShellCommand(runCtx, req.Command)
 		setSysProcAttr(cmd)
 
 		if err := validateWorkdir(req.Workdir); err != nil {
@@ -182,13 +189,13 @@ func (e *Executor) ExecuteWithMaxTimeout(
 		}
 		defer processTree.Close()
 
-		// Do not wait only on execCtx.Done(): the deferred cancel after an ordinary completion used
+		// Do not wait only on runCtx.Done(): the deferred cancel after an ordinary completion used
 		// to wake this goroutine and issue a late tree kill. By that point the PID could already
 		// have been recycled. processDone closes before the deferred cancel and fences that window.
 		processDone := make(chan struct{})
 		go func() {
 			select {
-			case <-execCtx.Done():
+			case <-runCtx.Done():
 				processTree.Kill()
 			case <-processDone:
 			}
@@ -199,7 +206,25 @@ func (e *Executor) ExecuteWithMaxTimeout(
 		scanStream(&wg, ch, stdoutReader, "stdout")
 		scanStream(&wg, ch, stderrReader, "stderr")
 
-		waitErr := cmd.Wait()
+		waitDone := make(chan error, 1)
+		go func() { waitDone <- cmd.Wait() }()
+
+		var waitErr error
+		waitReturned := false
+		if timeout < maxTimeout {
+			budget := time.NewTimer(timeout)
+			select {
+			case <-budget.C:
+				ch <- LineEvent{Backgrounded: true}
+			case err := <-waitDone:
+				waitErr = err
+				waitReturned = true
+				budget.Stop()
+			}
+		}
+		if !waitReturned {
+			waitErr = <-waitDone
+		}
 		close(processDone)
 		// Preserve a bounded tail-drain opportunity after the root exits. A detached descendant may
 		// keep inherited writers open indefinitely, so close only Conch's readers after the bound.
@@ -216,7 +241,7 @@ func (e *Executor) ExecuteWithMaxTimeout(
 			<-drained
 		}
 
-		if execCtx.Err() == context.DeadlineExceeded {
+		if runCtx.Err() == context.DeadlineExceeded {
 			ch <- LineEvent{Error: "command timed out", TimedOut: true}
 			return
 		}

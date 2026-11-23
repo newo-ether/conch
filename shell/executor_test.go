@@ -101,6 +101,48 @@ func TestExecutorMarksDeadlineTimeoutMachineReadably(t *testing.T) {
 	}
 }
 
+func TestExecutorBackgroundsAtWaitBudgetWithoutKilling(t *testing.T) {
+	executor := NewExecutor(100*time.Millisecond, 5*time.Second)
+	var backgrounded bool
+	var timedOut bool
+	var exitCode *int
+	start := time.Now()
+	for event := range executor.Execute(context.Background(), Request{
+		Command:   shortSleepCommand(),
+		TimeoutMs: 100,
+	}) {
+		if event.Backgrounded {
+			backgrounded = true
+		}
+		if event.TimedOut {
+			timedOut = true
+		}
+		if event.ExitCode != nil {
+			code := *event.ExitCode
+			exitCode = &code
+		}
+	}
+	if !backgrounded {
+		t.Fatal("wait budget did not produce a backgrounded event")
+	}
+	if timedOut {
+		t.Fatal("command finishing before the hard cap was reported as timed out")
+	}
+	if exitCode == nil || *exitCode != 0 {
+		t.Fatalf("backgrounded command must still run to completion: exit = %v", exitCode)
+	}
+	if elapsed := time.Since(start); elapsed < 250*time.Millisecond {
+		t.Fatalf("command survived only %s past its 100ms wait budget", elapsed)
+	}
+}
+
+func shortSleepCommand() string {
+	if runtime.GOOS == "windows" {
+		return "Start-Sleep -Milliseconds 300"
+	}
+	return "sleep 0.3"
+}
+
 func TestScanStreamDrainsOversizedLineAndContinues(t *testing.T) {
 	input := strings.Repeat("x", (1<<20)+1) + "\nnext\n\n"
 	events := make(chan LineEvent, 4)
